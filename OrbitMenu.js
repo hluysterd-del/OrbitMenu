@@ -6,12 +6,13 @@
 (function () {
     "use strict";
 
-    const VERSION = "3.1";
+    const VERSION = "3.2";
     const RETRY_TICKS = 300;
+    const PHOTON_SCAN_TICKS = 120;
     const MENU_LOCAL_POSITION = [-0.15, 0, 0.45];
     const MENU_LOCAL_ROTATION = [0, 0, 0, 1];
     const MENU_LOCAL_SCALE = [1e-3, 1e-3, 1e-3];
-    const TEXT_RECT_SIZE = [400, 600];
+    const TEXT_RECT_SIZE = [520, 720];
 
     function safeString(value) {
         try { return String(value && (value.stack || value.message || value)); }
@@ -41,6 +42,13 @@
         const PlayerControllerClass = acImage.class("AnimalCompany.PlayerController");
         const GorillaLocomotionClass = acImage.class("AnimalCompany.GorillaLocomotion");
 
+        const Photon = {
+            resolved: false,
+            PhotonNetworkClass: null,
+            PlayerClass: null,
+            lastResolveTick: -999999,
+        };
+
         globalThis.orbit = Object.assign({
             version: VERSION,
             tickCount: 0,
@@ -50,6 +58,9 @@
             menuText: null,
             cursor: 0,
             buttonLabels: ["Status", "Movement", "Visuals", "Player", "Settings"],
+            photonPlayerNames: [],
+            photonStatus: "Photon: waiting",
+            lastPhotonScan: -999999,
             lastLog: 0,
             lastHeadLog: 0,
             lastMenuText: "",
@@ -63,6 +74,9 @@
         if (!Array.isArray(orbit.buttonLabels) || orbit.buttonLabels.length === 0) {
             orbit.buttonLabels = ["Status", "Movement", "Visuals", "Player", "Settings"];
         }
+        if (!Array.isArray(orbit.photonPlayerNames)) orbit.photonPlayerNames = [];
+        if (typeof orbit.photonStatus !== "string") orbit.photonStatus = "Photon: waiting";
+        if (typeof orbit.lastPhotonScan !== "number") orbit.lastPhotonScan = -999999;
 
         function playerInst() {
             try {
@@ -97,6 +111,141 @@
                     .invoke(Il2Cpp.string("Arial.ttf"));
             } catch (_) {
                 return null;
+            }
+        }
+
+        function tryClass(assemblyNames, className) {
+            for (let i = 0; i < assemblyNames.length; i++) {
+                try {
+                    const assembly = Il2Cpp.domain.tryAssembly(assemblyNames[i]);
+                    if (!assembly) continue;
+                    const klass = assembly.image.tryClass(className);
+                    if (klass) return klass;
+                } catch (_) {}
+            }
+            return null;
+        }
+
+        function resolvePhotonClasses() {
+            if (Photon.resolved) return !!Photon.PhotonNetworkClass;
+            if (orbit.tickCount - Photon.lastResolveTick < PHOTON_SCAN_TICKS) return false;
+
+            Photon.lastResolveTick = orbit.tickCount;
+            Photon.PhotonNetworkClass = tryClass([
+                "PhotonUnityNetworking",
+                "PhotonRealtime",
+                "Assembly-CSharp",
+                "AnimalCompany",
+            ], "Photon.Pun.PhotonNetwork");
+            Photon.PlayerClass = tryClass([
+                "PhotonRealtime",
+                "PhotonUnityNetworking",
+                "Assembly-CSharp",
+                "AnimalCompany",
+            ], "Photon.Realtime.Player");
+
+            Photon.resolved = !!Photon.PhotonNetworkClass;
+            if (Photon.resolved) log("PhotonNetwork class resolved");
+            return Photon.resolved;
+        }
+
+        function jsString(value) {
+            if (value == null) return "";
+            try {
+                if (value.handle && value.handle.isNull()) return "";
+            } catch (_) {}
+            try { return value.toString(); }
+            catch (_) { return String(value); }
+        }
+
+        function callMethod(target, methodName) {
+            try {
+                const method = target.tryMethod ? target.tryMethod(methodName) : target.method(methodName);
+                if (!method) return null;
+                return method.invoke();
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function readField(target, fieldName) {
+            try {
+                const field = target.tryField ? target.tryField(fieldName) : target.field(fieldName);
+                if (!field) return null;
+                return field.value;
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function readPlayerName(player, index) {
+            const methodNames = ["get_NickName", "get_UserId"];
+            const fieldNames = ["NickName", "nickName", "UserId", "userId"];
+
+            for (let i = 0; i < methodNames.length; i++) {
+                const value = jsString(callMethod(player, methodNames[i])).trim();
+                if (value) return value;
+            }
+            for (let i = 0; i < fieldNames.length; i++) {
+                const value = jsString(readField(player, fieldNames[i])).trim();
+                if (value) return value;
+            }
+
+            const actorNumber = callMethod(player, "get_ActorNumber") || readField(player, "ActorNumber") || readField(player, "actorNumber");
+            if (actorNumber != null) return "Player " + actorNumber;
+            return "Player " + (index + 1);
+        }
+
+        function readPlayerIsLocal(player) {
+            const local = callMethod(player, "get_IsLocal") || readField(player, "IsLocal") || readField(player, "isLocal");
+            return local === true;
+        }
+
+        function clipName(name) {
+            if (name.length <= 24) return name;
+            return name.slice(0, 21) + "...";
+        }
+
+        function refreshPhotonPlayers() {
+            if (orbit.tickCount - orbit.lastPhotonScan < PHOTON_SCAN_TICKS) return;
+            orbit.lastPhotonScan = orbit.tickCount;
+
+            if (!resolvePhotonClasses()) {
+                orbit.photonStatus = "Photon: resolving";
+                orbit.photonPlayerNames = [];
+                return;
+            }
+
+            try {
+                const inRoomValue = callMethod(Photon.PhotonNetworkClass, "get_InRoom");
+                if (inRoomValue === false) {
+                    orbit.photonStatus = "Photon: not in room";
+                    orbit.photonPlayerNames = [];
+                    return;
+                }
+
+                const players = callMethod(Photon.PhotonNetworkClass, "get_PlayerList");
+                if (!players || typeof players.length !== "number") {
+                    orbit.photonStatus = "Photon: player list unavailable";
+                    orbit.photonPlayerNames = [];
+                    return;
+                }
+
+                const names = [];
+                const count = Math.min(players.length, 16);
+                for (let i = 0; i < count; i++) {
+                    const player = players.get(i);
+                    if (!player) continue;
+                    const suffix = readPlayerIsLocal(player) ? " (you)" : "";
+                    names.push(clipName(readPlayerName(player, i)) + suffix);
+                }
+
+                orbit.photonPlayerNames = names;
+                orbit.photonStatus = names.length > 0 ? "Photon Players (" + names.length + ")" : "Photon: no players found";
+            } catch (e) {
+                orbit.photonStatus = "Photon: read failed";
+                orbit.photonPlayerNames = [];
+                log("Photon player scan failed: " + safeString(e));
             }
         }
 
@@ -167,7 +316,7 @@
                 const menuText = textGO.method("AddComponent", 1).inflate(TextClass).invoke();
                 if (font) menuText.method("set_font").invoke(font);
                 menuText.method("set_supportRichText").invoke(true);
-                menuText.method("set_fontSize").invoke(14);
+                menuText.method("set_fontSize").invoke(13);
                 menuText.method("set_alignment").invoke(0);
                 menuText.method("set_resizeTextForBestFit").invoke(false);
                 menuText.method("set_fontStyle").invoke(1);
@@ -212,6 +361,8 @@
         }
 
         function renderMenuText() {
+            refreshPhotonPlayers();
+
             const lines = [
                 "<color=#bb88ff>Orbit Menu V" + VERSION + "</color>",
                 "<color=#888888>panel online</color>",
@@ -222,6 +373,17 @@
                 const cursor = (i === orbit.cursor) ? "<color=#ffcc00>></color> " : "  ";
                 lines.push(cursor + "[ " + orbit.buttonLabels[i] + " ]");
             }
+
+            lines.push("");
+            lines.push("<color=#88ccff>" + orbit.photonStatus + "</color>");
+            if (orbit.photonPlayerNames.length === 0) {
+                lines.push("  waiting...");
+            } else {
+                for (let i = 0; i < orbit.photonPlayerNames.length; i++) {
+                    lines.push("  - " + orbit.photonPlayerNames[i]);
+                }
+            }
+
             return lines.join("\n");
         }
 
@@ -244,6 +406,7 @@
                 log("tick " + orbit.tickCount +
                     " inited=" + orbit.menuInited +
                     " failed=" + orbit.buildFailed +
+                    " players=" + orbit.photonPlayerNames.length +
                     " cursor=" + orbit.cursor);
             }
         }
