@@ -1,9 +1,7 @@
 // ====================================================================
-//  Orbit Menu V1.1 — Animal Company
-//  Standalone Frida agent. Load order:
-//      1. frida-il2cpp-bridge.js   (Il2Cpp namespace)
-//      2. Frida-Map.js             (resolver -> Il2Cpp.$config.exports)
-//      3. OrbitMenu.js             (this file)
+//  Orbit Menu V2.0 — Animal Company
+//  Camera-attached text overlay + XR controller input readout.
+//  Load order: frida-il2cpp-bridge.js, Frida-Map.js, OrbitMenu.js
 // ====================================================================
 
 (function () {
@@ -12,12 +10,15 @@
     const _u = {
         GameObject: null, Transform: null, RectTransform: null,
         Vector3: null, Vector2: null, Color: null,
-        Canvas: null, Text: null, CanvasScaler: null, GraphicRaycaster: null,
-        Object: null, RenderMode: { ScreenSpaceOverlay: 0, ScreenSpaceCamera: 1, WorldSpace: 2 },
+        Canvas: null, Text: null, Image: null, CanvasScaler: null,
+        Camera: null, Object: null,
+        RenderMode: { ScreenSpaceOverlay: 0, ScreenSpaceCamera: 1, WorldSpace: 2 },
     };
     const _ac = {
         PlayerController: null,
         GorillaLocomotion: null,
+        XRInputManager: null,
+        XRHandSide: { Left: 0, Right: 1 },  // common AC enum
     };
 
     globalThis.orbit = globalThis.orbit || {
@@ -25,19 +26,16 @@
         hookInstalled: false,
         visible: false,
         rootHandle: null,
-        canvasHandle: null,
         textHandle: null,
-        buildAttempts: 0,
-        buildFailed: false,        // permanent give-up flag
+        cursor: 0,
+        buttonCount: 5,
+        buildFailed: false,
         buildFailReason: null,
         lastLog: 0,
-        currentCategory: 0,
-        cursor: 0,
     };
 
     function log(msg) { console.log("[Orbit] " + msg); }
 
-    // ---- Class resolution -------------------------------------------------
     function ensureClasses() {
         if (_u.GameObject) return true;
         try {
@@ -49,6 +47,7 @@
             _u.Vector2       = core.class("UnityEngine.Vector2");
             _u.Color         = core.class("UnityEngine.Color");
             _u.Object        = core.class("UnityEngine.Object");
+            _u.Camera        = core.tryClass("UnityEngine.Camera");
             _u.Canvas        = core.tryClass("UnityEngine.Canvas");
 
             if (!_u.Canvas) {
@@ -57,43 +56,28 @@
             }
             const uiAsm = Il2Cpp.domain.tryAssembly("UnityEngine.UI");
             if (uiAsm) {
-                _u.Text = uiAsm.image.tryClass("UnityEngine.UI.Text");
+                _u.Text  = uiAsm.image.tryClass("UnityEngine.UI.Text");
+                _u.Image = uiAsm.image.tryClass("UnityEngine.UI.Image");
                 _u.CanvasScaler = uiAsm.image.tryClass("UnityEngine.UI.CanvasScaler");
-                _u.GraphicRaycaster = uiAsm.image.tryClass("UnityEngine.UI.GraphicRaycaster");
             }
             const acAsm = Il2Cpp.domain.tryAssembly("AnimalCompany");
             if (acAsm) {
                 _ac.PlayerController  = acAsm.image.tryClass("AnimalCompany.PlayerController");
                 _ac.GorillaLocomotion = acAsm.image.tryClass("AnimalCompany.GorillaLocomotion");
+                _ac.XRInputManager    = acAsm.image.tryClass("AnimalCompany.XRInputManager");
             }
-            log("classes: GO=" + !!_u.GameObject + " Canvas=" + !!_u.Canvas +
-                " Text=" + !!_u.Text + " PC=" + !!_ac.PlayerController +
-                " GL=" + !!_ac.GorillaLocomotion);
+            log("classes: GO=" + !!_u.GameObject + " Cam=" + !!_u.Camera +
+                " Canvas=" + !!_u.Canvas + " Text=" + !!_u.Text +
+                " Image=" + !!_u.Image + " PC=" + !!_ac.PlayerController +
+                " GL=" + !!_ac.GorillaLocomotion + " XR=" + !!_ac.XRInputManager);
             return true;
-        } catch (e) {
-            log("ensureClasses err: " + (e && e.stack || e));
-            return false;
-        }
+        } catch (e) { log("ensureClasses err: " + e); return false; }
     }
 
-    // Value-type constructors. Vector3/Vector2/Color are STRUCTS — must unbox
-    // before passing to a method, otherwise the bridge marshals them as object refs.
-    function mkVec3(x, y, z) {
-        const v = _u.Vector3.alloc();
-        v.field("x").value = x; v.field("y").value = y; v.field("z").value = z;
-        return v.unbox();
-    }
-    function mkVec2(x, y) {
-        const v = _u.Vector2.alloc();
-        v.field("x").value = x; v.field("y").value = y;
-        return v.unbox();
-    }
-    function mkColor(r, g, b, a) {
-        const c = _u.Color.alloc();
-        c.field("r").value = r; c.field("g").value = g; c.field("b").value = b;
-        c.field("a").value = a == null ? 1 : a;
-        return c.unbox();
-    }
+    // ---- Value-type constructors (UNBOX before passing) -------------------
+    function mkVec3(x, y, z) { const v = _u.Vector3.alloc(); v.field("x").value = x; v.field("y").value = y; v.field("z").value = z; return v.unbox(); }
+    function mkVec2(x, y)    { const v = _u.Vector2.alloc(); v.field("x").value = x; v.field("y").value = y; return v.unbox(); }
+    function mkColor(r,g,b,a){ const c = _u.Color.alloc();   c.field("r").value = r; c.field("g").value = g; c.field("b").value = b; c.field("a").value = a==null?1:a; return c.unbox(); }
 
     function getPlayer() {
         if (!_ac.PlayerController) return null;
@@ -112,135 +96,114 @@
             return (v == null || v.handle.isNull()) ? null : v;
         } catch (_) { return null; }
     }
+    function addComponent(go, cls) {
+        try { return go.method("AddComponent", 1).invoke(cls.type.object); }
+        catch (e) { log("addComponent " + cls.name + " err: " + e); return null; }
+    }
+    function newGameObject(name) {
+        const go = _u.GameObject.new();
+        try { go.method("set_name").invoke(Il2Cpp.string(name)); } catch (_) {}
+        return go;
+    }
     function rewrap(handleStr, cls) {
         try { return new Il2Cpp.Object({ handle: ptr(handleStr), klass: cls || _u.GameObject }); }
         catch (_) { return null; }
     }
 
-    // ---- Create an empty GameObject (avoid CreatePrimitive enum issue + .ctor invokeRaw)
-    function newGameObject(name) {
-        // klass.new() calls the parameterless ctor — much safer than invokeRaw on .ctor(string)
-        const go = _u.GameObject.new();
-        try { go.method("set_name").invoke(Il2Cpp.string(name)); } catch (_) {}
-        return go;
-    }
-
-    // ---- Add a component by type ------------------------------------------
-    function addComponent(gameObject, cls) {
-        // AddComponent(Type) is an INSTANCE method — invoke on the GameObject instance, not the class.
-        try {
-            return gameObject.method("AddComponent", 1).invoke(cls.type.object);
-        } catch (e) {
-            log("addComponent " + cls.name + " err: " + e);
-            return null;
+    // Get the camera Transform via PlayerController, or Camera.main fallback.
+    function getCameraTransform() {
+        const p = getPlayer();
+        if (p) {
+            const t = getField(p, "_cameraTransform") || getField(p, "_headTransform");
+            if (t) return t;
         }
-    }
-
-    // ---- Build the menu (try once, give up on failure) -------------------
-    function buildMenu() {
-        if (orbit.rootHandle) return;
-        if (orbit.buildFailed) return;
-
-        orbit.buildAttempts++;
-        if (orbit.buildAttempts > 1) {
-            // already tried; quit retrying
-            return;
-        }
-        log("building menu (attempt 1)...");
-
-        // Stage-by-stage wrapper so we know exactly which call breaks.
-        function stage(label, fn) {
+        if (_u.Camera) {
             try {
-                log("  step: " + label);
-                return fn();
-            } catch (e) {
-                throw new Error("at step '" + label + "': " + (e && (e.message || e)));
-            }
+                const m = _u.Camera.tryMethod("get_main");
+                if (m) {
+                    const cam = m.invoke();
+                    if (cam && !cam.handle.isNull()) {
+                        return cam.method("get_transform").invoke();
+                    }
+                }
+            } catch (_) {}
+        }
+        return null;
+    }
+
+    // ---- Build menu (single attempt, fail-once guard) ---------------------
+    function buildMenu() {
+        if (orbit.rootHandle || orbit.buildFailed) return;
+        log("building menu...");
+
+        function stage(label, fn) {
+            try { log("  step: " + label); return fn(); }
+            catch (e) { throw new Error("at '" + label + "': " + (e && (e.message || e))); }
         }
 
         try {
             ensureClasses();
 
-            const root = stage("new GameObject(root)", () => newGameObject("OrbitRoot"));
+            const camT = stage("get camera transform", getCameraTransform);
+            if (!camT) throw new Error("camera Transform not available (in main menu?)");
 
-            // ---- Background quad (visible purple panel) ----
-            // Create as cube then squash flat — avoids PrimitiveType enum issues
-            // by NOT using CreatePrimitive at all.
-            const bg = stage("new GameObject(bg)", () => newGameObject("OrbitBG"));
-            stage("bg.SetParent(root)", () => {
-                bg.method("get_transform").invoke()
-                  .method("SetParent", 1).invoke(root.method("get_transform").invoke());
-            });
-            // Give bg a MeshFilter + MeshRenderer manually so it's visible.
-            const core = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
-            const MeshFilter   = core.tryClass("UnityEngine.MeshFilter");
-            const MeshRenderer = core.tryClass("UnityEngine.MeshRenderer");
-            const PrimitiveHelper = core.tryClass("UnityEngine.GameObject");
-
-            // Easier route: try CreatePrimitive now that we know addComponent works.
-            // CreatePrimitive(int) takes the underlying int of PrimitiveType.
-            // Cube=3 in PrimitiveType. If it crashes, we'll see the stage label.
-            let bgCube = null;
-            stage("CreatePrimitive(Cube=3) for bg", () => {
-                bgCube = _u.GameObject.method("CreatePrimitive").invoke(3);
-            });
-            if (bgCube && !bgCube.handle.isNull()) {
-                stage("bgCube parent + scale + color", () => {
-                    const bcT = bgCube.method("get_transform").invoke();
-                    bcT.method("SetParent", 1).invoke(root.method("get_transform").invoke());
-                    bcT.method("set_localPosition").invoke(mkVec3(0, 0, 0.01));
-                    bcT.method("set_localScale").invoke(mkVec3(0.4, 0.5, 0.005));
-                    try {
-                        const r = bgCube.method("GetComponent", 1).inflate(_u.Renderer).invoke();
-                        if (r && !r.handle.isNull()) {
-                            const mat = r.method("get_material").invoke();
-                            mat.method("set_color", 1).invoke(mkColor(0.35, 0.1, 0.55, 1));
-                        }
-                    } catch (e) { log("  bg color err: " + e); }
-                });
-            }
-
-            // ---- Canvas + Text ----
+            // Canvas as child of camera transform — auto-follows, auto-faces.
             const canvasGO = stage("new GameObject(canvas)", () => newGameObject("OrbitCanvas"));
-            stage("canvas.SetParent(root)", () => {
+            stage("canvas.SetParent(camera)", () => {
                 canvasGO.method("get_transform").invoke()
-                        .method("SetParent", 1).invoke(root.method("get_transform").invoke());
+                        .method("SetParent", 1).invoke(camT);
+            });
+            // Local position 0.5m in front of camera (camera looks down +Z in Unity)
+            stage("canvas.localPosition(0,0,0.5)", () => {
+                canvasGO.method("get_transform").invoke().method("set_localPosition").invoke(mkVec3(0, 0, 0.5));
+            });
+            stage("canvas.localRotation reset", () => {
+                // Identity rotation — text faces same way as camera looks
+                const Quat = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image.class("UnityEngine.Quaternion");
+                const q = Quat.alloc();
+                q.field("x").value = 0; q.field("y").value = 0; q.field("z").value = 0; q.field("w").value = 1;
+                canvasGO.method("get_transform").invoke().method("set_localRotation").invoke(q.unbox());
             });
             const canvas = stage("AddComponent<Canvas>", () => addComponent(canvasGO, _u.Canvas));
-            if (!canvas || canvas.handle.isNull()) throw new Error("AddComponent<Canvas> returned null");
-            stage("canvas.set_renderMode(WorldSpace)", () => {
-                canvas.method("set_renderMode").invoke(_u.RenderMode.WorldSpace);
-            });
+            stage("canvas.set_renderMode(WorldSpace)", () => canvas.method("set_renderMode").invoke(_u.RenderMode.WorldSpace));
             if (_u.CanvasScaler) stage("AddComponent<CanvasScaler>", () => addComponent(canvasGO, _u.CanvasScaler));
             stage("canvas.localScale(0.001)", () => {
                 canvasGO.method("get_transform").invoke().method("set_localScale").invoke(mkVec3(0.001, 0.001, 0.001));
             });
 
-            const textGO = stage("new GameObject(text)", () => newGameObject("OrbitText"));
-            stage("text.SetParent(canvas)", () => {
-                textGO.method("get_transform").invoke()
-                      .method("SetParent", 1).invoke(canvasGO.method("get_transform").invoke());
-            });
-            const text = stage("AddComponent<Text>", () => addComponent(textGO, _u.Text));
-            if (!text || text.handle.isNull()) throw new Error("AddComponent<Text> returned null");
-
-            stage("text.set_text", () => text.method("set_text").invoke(Il2Cpp.string(renderMenuText())));
-            stage("text.set_color", () => text.method("set_color").invoke(mkColor(1.0, 1.0, 1.0, 1.0)));   // white over purple bg
-            stage("text.set_fontSize", () => text.method("set_fontSize").invoke(48));
-            stage("text.set_alignment", () => text.method("set_alignment").invoke(4));   // MiddleCenter
-
-            try {
-                const rect = textGO.method("GetComponent", 1).inflate(_u.RectTransform).invoke();
-                if (rect && !rect.handle.isNull()) {
-                    rect.method("set_sizeDelta").invoke(mkVec2(400, 500));
+            // Background image (solid purple panel)
+            if (_u.Image) {
+                const bgGO = stage("new GameObject(bg)", () => newGameObject("OrbitBG"));
+                stage("bg.SetParent(canvas)", () => bgGO.method("get_transform").invoke().method("SetParent", 1).invoke(canvasGO.method("get_transform").invoke()));
+                stage("bg.localPosition", () => bgGO.method("get_transform").invoke().method("set_localPosition").invoke(mkVec3(0, 0, 0)));
+                const img = stage("AddComponent<Image>", () => addComponent(bgGO, _u.Image));
+                if (img && !img.handle.isNull()) {
+                    stage("img.set_color(purple)", () => img.method("set_color").invoke(mkColor(0.25, 0.05, 0.45, 0.92)));
                 }
-            } catch (e) { log("  rect sizeDelta skipped: " + e); }
+                try {
+                    const rt = bgGO.method("GetComponent", 1).inflate(_u.RectTransform).invoke();
+                    if (rt && !rt.handle.isNull()) rt.method("set_sizeDelta").invoke(mkVec2(500, 400));
+                } catch (e) { log("  bg rect err: " + e); }
+            }
 
-            orbit.rootHandle   = root.handle.toString();
-            orbit.canvasHandle = canvasGO.handle.toString();
-            orbit.textHandle   = textGO.handle.toString();
-            orbit.visible      = true;
-            log("menu built! root=" + orbit.rootHandle);
+            // Text overlay
+            const textGO = stage("new GameObject(text)", () => newGameObject("OrbitText"));
+            stage("text.SetParent(canvas)", () => textGO.method("get_transform").invoke().method("SetParent", 1).invoke(canvasGO.method("get_transform").invoke()));
+            stage("text.localPosition", () => textGO.method("get_transform").invoke().method("set_localPosition").invoke(mkVec3(0, 0, -0.01)));
+            const text = stage("AddComponent<Text>", () => addComponent(textGO, _u.Text));
+            stage("text.set_text", () => text.method("set_text").invoke(Il2Cpp.string(renderMenuText())));
+            stage("text.set_color", () => text.method("set_color").invoke(mkColor(1, 1, 1, 1)));
+            stage("text.set_fontSize", () => text.method("set_fontSize").invoke(36));
+            stage("text.set_alignment", () => text.method("set_alignment").invoke(4));   // MiddleCenter
+            try {
+                const rt = textGO.method("GetComponent", 1).inflate(_u.RectTransform).invoke();
+                if (rt && !rt.handle.isNull()) rt.method("set_sizeDelta").invoke(mkVec2(480, 380));
+            } catch (e) { log("  text rect err: " + e); }
+
+            orbit.rootHandle = canvasGO.handle.toString();
+            orbit.textHandle = textGO.handle.toString();
+            orbit.visible = true;
+            log("MENU BUILT! root=" + orbit.rootHandle);
         } catch (e) {
             orbit.buildFailed = true;
             orbit.buildFailReason = String(e && (e.stack || e.message || e));
@@ -249,80 +212,96 @@
     }
 
     function renderMenuText() {
-        const out = [
-            "testing",
-            "",
-            "[ Button 1 ]",
-            "[ Button 2 ]",
-            "[ Button 3 ]",
-            "[ Button 4 ]",
-            "[ Button 5 ]",
-        ];
-        return out.join("\n");
+        const lines = ["testing", ""];
+        for (let i = 0; i < orbit.buttonCount; i++) {
+            const arrow = (i === orbit.cursor) ? "> " : "  ";
+            lines.push(arrow + "[ Button " + (i + 1) + " ]");
+        }
+        return lines.join("\n");
     }
 
-    function repositionMenu() {
-        if (!orbit.rootHandle) return;
-        const player = getPlayer();
-        if (!player) return;
-        const head = getField(player, "_headTransform") || getField(player, "_cameraTransform");
-        if (!head) return;
+    function refreshText() {
+        if (!orbit.textHandle) return;
         try {
-            const root = rewrap(orbit.rootHandle, _u.GameObject);
-            if (!root) return;
-            const rootT = root.method("get_transform").invoke();
-
-            // Position 0.6m in front of head
-            const hp = head.method("get_position").invoke();
-            const hf = head.method("get_forward").invoke();
-            const px = hp.field("x").value + hf.field("x").value * 0.6;
-            const py = hp.field("y").value + hf.field("y").value * 0.6;
-            const pz = hp.field("z").value + hf.field("z").value * 0.6;
-            rootT.method("set_position").invoke(mkVec3(px, py, pz));
-
-            // Face the head — use head's rotation directly so text isn't mirrored.
-            // (Canvas text is on the +Z face of the panel, so we want menu.forward
-            //  pointing AWAY from camera; copy head rotation gives us exactly that.)
-            const hr = head.method("get_rotation").invoke();
-            rootT.method("set_rotation").invoke(hr);
+            const t = rewrap(orbit.textHandle, _u.Text);
+            if (t) t.method("set_text").invoke(Il2Cpp.string(renderMenuText()));
         } catch (_) {}
+    }
+
+    // ---- XR input ---------------------------------------------------------
+    function readXR() {
+        const out = { lJoyY: 0, rJoyY: 0, lTrig: false, rTrig: false, lGrip: false };
+        if (!_ac.XRInputManager) return out;
+        try {
+            const GetJoystick = _ac.XRInputManager.tryMethod("GetJoystickValue");
+            const GetTrigger  = _ac.XRInputManager.tryMethod("GetTriggerButtonValue");
+            if (GetJoystick) {
+                const ljv = GetJoystick.invoke(0); // 0 = Left
+                if (ljv) out.lJoyY = ljv.field("y").value;
+                const rjv = GetJoystick.invoke(1);
+                if (rjv) out.rJoyY = rjv.field("y").value;
+            }
+            if (GetTrigger) {
+                out.lTrig = !!GetTrigger.invoke(0);
+                out.rTrig = !!GetTrigger.invoke(1);
+            }
+        } catch (e) {
+            // Don't log every tick; just track once
+        }
+        return out;
+    }
+
+    let lastCursorMoveTick = 0;
+    function handleInput() {
+        const xr = readXR();
+        // Joystick cursor navigation with cooldown so it doesn't sprint
+        const now = orbit.tickCount;
+        if (now - lastCursorMoveTick > 15) {
+            if (xr.lJoyY > 0.5 || xr.rJoyY > 0.5) {
+                orbit.cursor = (orbit.cursor - 1 + orbit.buttonCount) % orbit.buttonCount;
+                lastCursorMoveTick = now;
+                refreshText();
+            } else if (xr.lJoyY < -0.5 || xr.rJoyY < -0.5) {
+                orbit.cursor = (orbit.cursor + 1) % orbit.buttonCount;
+                lastCursorMoveTick = now;
+                refreshText();
+            }
+        }
+        return xr;
     }
 
     function onTick() {
         orbit.tickCount++;
-        if (!orbit.rootHandle && !orbit.buildFailed) {
-            buildMenu();
-        } else if (orbit.rootHandle) {
-            repositionMenu();
-        }
-        if (orbit.tickCount - orbit.lastLog >= 300) {
-            orbit.lastLog = orbit.tickCount;
-            log("tick " + orbit.tickCount + " visible=" + orbit.visible +
-                " built=" + !!orbit.rootHandle + " failed=" + orbit.buildFailed);
+        if (!orbit.rootHandle && !orbit.buildFailed) { buildMenu(); return; }
+        if (orbit.rootHandle) {
+            const xr = handleInput();
+            if (orbit.tickCount - orbit.lastLog >= 300) {
+                orbit.lastLog = orbit.tickCount;
+                log("tick " + orbit.tickCount + " cursor=" + orbit.cursor +
+                    " XR{lY=" + xr.lJoyY.toFixed(2) + " rY=" + xr.rJoyY.toFixed(2) +
+                    " lT=" + xr.lTrig + " rT=" + xr.rTrig + "}");
+            }
         }
     }
 
     function installHook() {
         if (orbit.hookInstalled) return;
-        if (!_ac.GorillaLocomotion) { log("ERROR: GorillaLocomotion class not loaded"); return; }
-        let target = _ac.GorillaLocomotion.tryMethod("OnUpdate");
-        let name = "OnUpdate";
-        if (!target) { target = _ac.GorillaLocomotion.tryMethod("FixedUpdate"); name = "FixedUpdate"; }
+        if (!_ac.GorillaLocomotion) { log("ERROR: GorillaLocomotion class missing"); return; }
+        let target = _ac.GorillaLocomotion.tryMethod("OnUpdate") || _ac.GorillaLocomotion.tryMethod("FixedUpdate");
         if (!target) { log("ERROR: no OnUpdate/FixedUpdate"); return; }
-
         Interceptor.attach(target.virtualAddress, {
             onEnter: function () { try { onTick(); } catch (_) {} }
         });
         orbit.hookInstalled = true;
-        log("hook installed on GorillaLocomotion." + name);
+        log("hook installed on " + target.name);
     }
 
-    log("===== Orbit Menu V1.1 LOADING =====");
+    log("===== Orbit Menu V2.0 LOADING =====");
     Il2Cpp.perform(function () {
         try {
             ensureClasses();
             installHook();
-            log("===== Orbit Menu V1.1 READY =====");
+            log("===== Orbit Menu V2.0 READY =====");
         } catch (e) {
             log("bootstrap err: " + (e && e.stack || e));
         }
