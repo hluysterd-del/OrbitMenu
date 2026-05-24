@@ -47,14 +47,24 @@
 
         globalThis.orbit = globalThis.orbit || {};
         const orbit = globalThis.orbit;
-        if (orbit.version && orbit.version !== VERSION && orbit.root) {
-            try { U.Object.method("Destroy", 1).invoke(orbit.root); } catch (_) {}
+        const previousVersion = orbit.version || "";
+        if (previousVersion !== VERSION) {
+            try { if (orbit.root) U.Object.method("Destroy", 1).invoke(orbit.root); } catch (_) {}
+            try {
+                if (orbit.tmpHandle) {
+                    const oldTmp = new Il2Cpp.Object({ handle: ptr(orbit.tmpHandle), klass: U.GameObject });
+                    U.Object.method("Destroy", 1).invoke(oldTmp);
+                }
+            } catch (_) {}
+            orbit.hookInstalled = false;
+            orbit.hookVersion = "";
         }
 
         Object.assign(orbit, {
             version: VERSION,
             tickCount: orbit.tickCount || 0,
-            hookInstalled: orbit.hookInstalled || false,
+            hookInstalled: orbit.hookVersion === VERSION,
+            hookVersion: orbit.hookVersion || "",
             root: null,
             rows: [],
             labels: [],
@@ -459,7 +469,7 @@
         }
 
         function installHook() {
-            if (orbit.hookInstalled) return;
+            if (orbit.hookInstalled && orbit.hookVersion === VERSION) return;
             const target = AC.GorillaLocomotion.tryMethod("OnUpdate") || AC.GorillaLocomotion.tryMethod("FixedUpdate");
             if (!target) {
                 log("error: no GorillaLocomotion OnUpdate/FixedUpdate method found");
@@ -472,6 +482,7 @@
                 },
             });
             orbit.hookInstalled = true;
+            orbit.hookVersion = VERSION;
             log("hook installed on GorillaLocomotion." + target.name);
         }
 
