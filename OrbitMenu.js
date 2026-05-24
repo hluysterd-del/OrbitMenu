@@ -162,6 +162,45 @@
             ensureClasses();
 
             const root = stage("new GameObject(root)", () => newGameObject("OrbitRoot"));
+
+            // ---- Background quad (visible purple panel) ----
+            // Create as cube then squash flat — avoids PrimitiveType enum issues
+            // by NOT using CreatePrimitive at all.
+            const bg = stage("new GameObject(bg)", () => newGameObject("OrbitBG"));
+            stage("bg.SetParent(root)", () => {
+                bg.method("get_transform").invoke()
+                  .method("SetParent", 1).invoke(root.method("get_transform").invoke());
+            });
+            // Give bg a MeshFilter + MeshRenderer manually so it's visible.
+            const core = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
+            const MeshFilter   = core.tryClass("UnityEngine.MeshFilter");
+            const MeshRenderer = core.tryClass("UnityEngine.MeshRenderer");
+            const PrimitiveHelper = core.tryClass("UnityEngine.GameObject");
+
+            // Easier route: try CreatePrimitive now that we know addComponent works.
+            // CreatePrimitive(int) takes the underlying int of PrimitiveType.
+            // Cube=3 in PrimitiveType. If it crashes, we'll see the stage label.
+            let bgCube = null;
+            stage("CreatePrimitive(Cube=3) for bg", () => {
+                bgCube = _u.GameObject.method("CreatePrimitive").invoke(3);
+            });
+            if (bgCube && !bgCube.handle.isNull()) {
+                stage("bgCube parent + scale + color", () => {
+                    const bcT = bgCube.method("get_transform").invoke();
+                    bcT.method("SetParent", 1).invoke(root.method("get_transform").invoke());
+                    bcT.method("set_localPosition").invoke(mkVec3(0, 0, 0.01));
+                    bcT.method("set_localScale").invoke(mkVec3(0.4, 0.5, 0.005));
+                    try {
+                        const r = bgCube.method("GetComponent", 1).inflate(_u.Renderer).invoke();
+                        if (r && !r.handle.isNull()) {
+                            const mat = r.method("get_material").invoke();
+                            mat.method("set_color", 1).invoke(mkColor(0.35, 0.1, 0.55, 1));
+                        }
+                    } catch (e) { log("  bg color err: " + e); }
+                });
+            }
+
+            // ---- Canvas + Text ----
             const canvasGO = stage("new GameObject(canvas)", () => newGameObject("OrbitCanvas"));
             stage("canvas.SetParent(root)", () => {
                 canvasGO.method("get_transform").invoke()
@@ -186,14 +225,14 @@
             if (!text || text.handle.isNull()) throw new Error("AddComponent<Text> returned null");
 
             stage("text.set_text", () => text.method("set_text").invoke(Il2Cpp.string(renderMenuText())));
-            stage("text.set_color", () => text.method("set_color").invoke(mkColor(0.9, 0.7, 1.0, 1.0)));
-            stage("text.set_fontSize", () => text.method("set_fontSize").invoke(40));
-            stage("text.set_alignment", () => text.method("set_alignment").invoke(4));
+            stage("text.set_color", () => text.method("set_color").invoke(mkColor(1.0, 1.0, 1.0, 1.0)));   // white over purple bg
+            stage("text.set_fontSize", () => text.method("set_fontSize").invoke(48));
+            stage("text.set_alignment", () => text.method("set_alignment").invoke(4));   // MiddleCenter
 
             try {
                 const rect = textGO.method("GetComponent", 1).inflate(_u.RectTransform).invoke();
                 if (rect && !rect.handle.isNull()) {
-                    rect.method("set_sizeDelta").invoke(mkVec2(800, 400));
+                    rect.method("set_sizeDelta").invoke(mkVec2(400, 500));
                 }
             } catch (e) { log("  rect sizeDelta skipped: " + e); }
 
@@ -210,11 +249,15 @@
     }
 
     function renderMenuText() {
-        const cats = ["Prefab", "Spawner", "Movement", "Safety"];
-        const out = ["=== Orbit Menu V1 ==="];
-        for (let i = 0; i < cats.length; i++) {
-            out.push((i === orbit.currentCategory ? "> " : "  ") + cats[i]);
-        }
+        const out = [
+            "testing",
+            "",
+            "[ Button 1 ]",
+            "[ Button 2 ]",
+            "[ Button 3 ]",
+            "[ Button 4 ]",
+            "[ Button 5 ]",
+        ];
         return out.join("\n");
     }
 
@@ -227,12 +270,21 @@
         try {
             const root = rewrap(orbit.rootHandle, _u.GameObject);
             if (!root) return;
+            const rootT = root.method("get_transform").invoke();
+
+            // Position 0.6m in front of head
             const hp = head.method("get_position").invoke();
             const hf = head.method("get_forward").invoke();
             const px = hp.field("x").value + hf.field("x").value * 0.6;
             const py = hp.field("y").value + hf.field("y").value * 0.6;
             const pz = hp.field("z").value + hf.field("z").value * 0.6;
-            root.method("get_transform").invoke().method("set_position").invoke(mkVec3(px, py, pz));
+            rootT.method("set_position").invoke(mkVec3(px, py, pz));
+
+            // Face the head — use head's rotation directly so text isn't mirrored.
+            // (Canvas text is on the +Z face of the panel, so we want menu.forward
+            //  pointing AWAY from camera; copy head rotation gives us exactly that.)
+            const hr = head.method("get_rotation").invoke();
+            rootT.method("set_rotation").invoke(hr);
         } catch (_) {}
     }
 
