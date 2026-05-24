@@ -6,7 +6,7 @@
 (function () {
     "use strict";
 
-    const VERSION = "4.0";
+    const VERSION = "4.1";
     const LOG_TICKS = 300;
     const PHOTON_SCAN_TICKS = 120;
     const INPUT_REPEAT_TICKS = 14;
@@ -37,6 +37,7 @@
         U.Vector3 = core.class("UnityEngine.Vector3");
         U.Color = core.class("UnityEngine.Color");
         U.Quaternion = core.class("UnityEngine.Quaternion");
+        U.Camera = core.class("UnityEngine.Camera");
         U.TextMesh = textModule.tryClass("UnityEngine.TextMesh");
         U.Input = inputLegacy ? inputLegacy.image.tryClass("UnityEngine.Input") : core.tryClass("UnityEngine.Input");
 
@@ -68,7 +69,7 @@
             root: null,
             rows: [],
             labels: [],
-            visible: false,
+            visible: true,
             cursor: 0,
             page: "main",
             lastToggleDown: false,
@@ -220,11 +221,17 @@
 
         function getHeadTransform() {
             const player = getPlayer();
-            if (!player) return null;
-            return fieldObject(player, "headFollower") ||
+            const playerHead = player ? fieldObject(player, "headFollower") ||
                 fieldObject(player, "_headTransform") ||
                 fieldObject(player, "_cameraTransform") ||
-                fieldObject(player, "cameraTransform");
+                fieldObject(player, "cameraTransform") : null;
+            if (playerHead) return playerHead;
+
+            try {
+                const cam = U.Camera.method("get_main").invoke();
+                if (cam && !cam.handle.isNull()) return cam.method("get_transform").invoke();
+            } catch (_) {}
+            return null;
         }
 
         function callMethod(target, methodName) {
@@ -398,7 +405,7 @@
 
             orbit.root = root;
             rebuildRows();
-            setActive(root, false);
+            setActive(root, orbit.visible);
             log("cube menu built: " + root.handle.toString());
         }
 
