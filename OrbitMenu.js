@@ -76,21 +76,23 @@
         }
     }
 
+    // Value-type constructors. Vector3/Vector2/Color are STRUCTS — must unbox
+    // before passing to a method, otherwise the bridge marshals them as object refs.
     function mkVec3(x, y, z) {
         const v = _u.Vector3.alloc();
         v.field("x").value = x; v.field("y").value = y; v.field("z").value = z;
-        return v;
+        return v.unbox();
     }
     function mkVec2(x, y) {
         const v = _u.Vector2.alloc();
         v.field("x").value = x; v.field("y").value = y;
-        return v;
+        return v.unbox();
     }
     function mkColor(r, g, b, a) {
         const c = _u.Color.alloc();
         c.field("r").value = r; c.field("g").value = g; c.field("b").value = b;
         c.field("a").value = a == null ? 1 : a;
-        return c;
+        return c.unbox();
     }
 
     function getPlayer() {
