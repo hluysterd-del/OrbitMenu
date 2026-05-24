@@ -1,0 +1,42 @@
+Orbit Menu - Setup Guide
+========================
+
+REQUIREMENTS
+------------
+Python 3.x must be installed. Get it at python.org if you do not have it.
+During install, check "Add Python to PATH".
+
+Frida installs itself on first run. If Windows asks for permission, allow
+Python to finish the install.
+
+HOW TO USE
+----------
+1. Launch Animal Company and get fully into the game, not just the menu.
+2. Double-click run.bat in this Launcher folder.
+3. Orbit Menu loads as an in-game panel that follows your head.
+
+The launcher pulls the latest build each time, so updates happen automatically
+without re-downloading this release. If the update check fails but .cache has a
+complete previous build, the launcher uses that cached copy.
+
+REPO
+----
+github.com/hluysterd-del/OrbitMenu
+
+TROUBLESHOOTING
+---------------
+"process not found"     -> Animal Company is not running yet. Start it first.
+"python not found"      -> Install Python and check the PATH box.
+"frida not found"       -> Let run.py install it. If it just installed, rerun
+                           run.bat once.
+Menu does not appear     -> Check the Frida console window. If you see a class
+                           or player/head warning, get fully in-game and wait a
+                           few seconds.
+Fetch fails             -> Check your internet, VPN, proxy, or antivirus.
+                           Existing cached files are used when possible.
+Stuck on old build      -> Delete the .cache folder, then run again.
+
+NOTES
+-----
+This is an early menu build. Input handling and real button actions are still
+future work.
