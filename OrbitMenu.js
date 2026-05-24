@@ -147,8 +147,17 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  PLAYER ITERATION
+    //  PLAYER ITERATION — with safe int/bool parsing
     // ================================================================
+    function readInt(v) {
+        if (typeof v === "number") return v;
+        // Boxed int from IL2CPP — try unbox
+        try { const u = v.unbox(); if (typeof u === "number") return u; } catch(_){}
+        // Last resort: parse string representation
+        const n = parseInt(String(v), 10);
+        return isNaN(n) ? 0 : n;
+    }
+
     function forEachOtherPlayer(fn) {
         try {
             const allPlayers = NetPlayerClass.method("get_spawnedPlayers").invoke();
@@ -157,9 +166,27 @@ Il2Cpp.perform(() => {
                 return 0;
             }
             const localP = NetPlayerClass.method("get_localPlayer").invoke();
+            const localH = localP ? localP.handle.toString() : "";
 
             let count = 0;
-            try { count = allPlayers.method("get_Count").invoke(); } catch(_) { return 0; }
+            try { count = readInt(allPlayers.method("get_Count").invoke()); } catch(_) { return 0; }
+
+            // One-time diagnostic on first call
+            if (!O._diagDone) {
+                O._diagDone = true;
+                log("DIAG: count=" + count + " type=" + typeof count);
+                for (let d = 0; d < Math.min(count, 3); d++) {
+                    try {
+                        const dp = allPlayers.method("get_Item").invoke(d);
+                        const rawMine = dp.method("get_IsMine").invoke();
+                        log("  [" + d + "] rawMine=" + rawMine +
+                            " typeof=" + typeof rawMine +
+                            " readBool=" + readBool(rawMine) +
+                            " handle=" + dp.handle.toString());
+                    } catch(e) { log("  [" + d + "] err: " + e); }
+                }
+                log("  localH=" + localH);
+            }
 
             let affected = 0;
             for (let i = 0; i < count; i++) {
@@ -167,20 +194,8 @@ Il2Cpp.perform(() => {
                 try { np = allPlayers.method("get_Item").invoke(i); } catch(_) { continue; }
                 if (!np || np.handle.isNull()) continue;
 
-                // Skip local player
-                try {
-                    const mine = np.method("get_IsMine").invoke();
-                    // Unbox if needed
-                    let isMine = false;
-                    if (mine === true) isMine = true;
-                    else if (mine && mine !== false) {
-                        try { isMine = !!mine.unbox(); } catch(_) { isMine = !!mine; }
-                    }
-                    if (isMine) continue;
-                } catch(_) {
-                    // Fallback: handle comparison
-                    if (localP && np.handle.toString() === localP.handle.toString()) continue;
-                }
+                // Skip local player — use handle comparison (most reliable)
+                if (localH && np.handle.toString() === localH) continue;
 
                 try { fn(np); affected++; } catch(e) {
                     if (O.tick % 300 === 0) log("forEachOther item err: " + e);
@@ -199,8 +214,14 @@ Il2Cpp.perform(() => {
     function readBool(v) {
         if (v === true) return true;
         if (v === false || v === null || v === undefined) return false;
-        try { return !!v.unbox(); } catch(_) {}
-        return !!v;
+        // Boxed boolean from IL2CPP — must unbox to get real value
+        try {
+            const u = v.unbox();
+            if (typeof u === "boolean") return u;
+            if (typeof u === "number") return u !== 0;
+            return false; // Don't trust !!object — boxed false is still truthy
+        } catch(_) {}
+        return false; // Safer default than !!v which is always true for objects
     }
 
     function joyY(hand) {
