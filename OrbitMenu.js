@@ -1,26 +1,21 @@
 // ====================================================================
 //  Orbit Menu - Animal Company
-//  Visibility-first world-space Canvas + UI.Text panel.
+//  Cube menu prototype. Y toggles the panel, left stick moves, B selects.
 // ====================================================================
 
 (function () {
     "use strict";
 
-    const VERSION = "3.4";
+    const VERSION = "4.0";
     const LOG_TICKS = 300;
     const PHOTON_SCAN_TICKS = 120;
     const INPUT_REPEAT_TICKS = 14;
-    const MENU_DISTANCE = 0.95;
+    const MENU_DISTANCE = 0.78;
     const MENU_DOWN = 0.04;
-    const MENU_SCALE = 0.00072;
 
     const U = {};
     const AC = {};
-    const Photon = {
-        resolved: false,
-        PhotonNetworkClass: null,
-        lastResolveTick: -999999,
-    };
+    const Photon = { resolved: false, PhotonNetworkClass: null, lastResolveTick: -999999 };
 
     function log(msg) { console.log("[Orbit] " + msg); }
     function safeString(value) {
@@ -32,68 +27,50 @@
         log("===== Orbit Menu V" + VERSION + " LOADING =====");
 
         const core = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
-        const uiModule = Il2Cpp.domain.assembly("UnityEngine.UIModule").image;
-        const ui = Il2Cpp.domain.assembly("UnityEngine.UI").image;
-        const text = Il2Cpp.domain.assembly("UnityEngine.TextRenderingModule").image;
+        const textModule = Il2Cpp.domain.assembly("UnityEngine.TextRenderingModule").image;
         const animal = Il2Cpp.domain.assembly("AnimalCompany").image;
+        const inputLegacy = Il2Cpp.domain.tryAssembly("UnityEngine.InputLegacyModule");
 
         U.GameObject = core.class("UnityEngine.GameObject");
         U.Object = core.class("UnityEngine.Object");
-        U.Transform = core.class("UnityEngine.Transform");
-        U.RectTransform = core.class("UnityEngine.RectTransform");
-        U.Vector2 = core.class("UnityEngine.Vector2");
+        U.Renderer = core.class("UnityEngine.Renderer");
         U.Vector3 = core.class("UnityEngine.Vector3");
         U.Color = core.class("UnityEngine.Color");
-        U.Canvas = uiModule.class("UnityEngine.Canvas");
-        U.Text = ui.class("UnityEngine.UI.Text");
-        U.CanvasScaler = ui.tryClass("UnityEngine.UI.CanvasScaler");
-        U.GraphicRaycaster = ui.tryClass("UnityEngine.UI.GraphicRaycaster");
-        U.Font = text.class("UnityEngine.Font");
-        try {
-            const inputLegacy = Il2Cpp.domain.tryAssembly("UnityEngine.InputLegacyModule");
-            U.Input = inputLegacy ? inputLegacy.image.tryClass("UnityEngine.Input") : core.tryClass("UnityEngine.Input");
-        } catch (_) {
-            U.Input = null;
-        }
+        U.Quaternion = core.class("UnityEngine.Quaternion");
+        U.TextMesh = textModule.tryClass("UnityEngine.TextMesh");
+        U.Input = inputLegacy ? inputLegacy.image.tryClass("UnityEngine.Input") : core.tryClass("UnityEngine.Input");
+
         AC.PlayerController = animal.class("AnimalCompany.PlayerController");
         AC.GorillaLocomotion = animal.class("AnimalCompany.GorillaLocomotion");
 
-        globalThis.orbit = Object.assign({
+        const tabs = ["Status", "Movement", "Visuals", "Player", "Settings"];
+
+        globalThis.orbit = globalThis.orbit || {};
+        const orbit = globalThis.orbit;
+        if (orbit.version && orbit.version !== VERSION && orbit.root) {
+            try { U.Object.method("Destroy", 1).invoke(orbit.root); } catch (_) {}
+        }
+
+        Object.assign(orbit, {
             version: VERSION,
-            tickCount: 0,
-            hookInstalled: false,
-            menuInited: false,
+            tickCount: orbit.tickCount || 0,
+            hookInstalled: orbit.hookInstalled || false,
             root: null,
-            text: null,
+            rows: [],
+            labels: [],
+            visible: false,
             cursor: 0,
             page: "main",
-            menuHeld: false,
-            lastMoveTick: -999999,
+            lastToggleDown: false,
             lastSelectDown: false,
-            lastMenuHeld: false,
-            buttonLabels: ["Status", "Movement", "Visuals", "Player", "Settings"],
-            photonPlayerNames: [],
+            lastMoveTick: -999999,
+            lastRenderKey: "",
             photonStatus: "Photon: waiting",
+            photonPlayerNames: [],
             lastPhotonScan: -999999,
             lastLog: 0,
-            lastText: "",
             lastVisiblePosition: "",
-        }, globalThis.orbit || {});
-
-        const orbit = globalThis.orbit;
-        orbit.version = VERSION;
-        if (!Array.isArray(orbit.buttonLabels) || orbit.buttonLabels.length === 0) {
-            orbit.buttonLabels = ["Status", "Movement", "Visuals", "Player", "Settings"];
-        }
-        if (!Array.isArray(orbit.photonPlayerNames)) orbit.photonPlayerNames = [];
-        if (typeof orbit.page !== "string") orbit.page = "main";
-
-        function vec2(x, y) {
-            const v = U.Vector2.alloc();
-            v.field("x").value = x;
-            v.field("y").value = y;
-            return v.unbox();
-        }
+        });
 
         function vec3(x, y, z) {
             const v = U.Vector3.alloc();
@@ -112,94 +89,68 @@
             return c.unbox();
         }
 
-        function newGameObject(name) {
-            const go = U.GameObject.new();
+        function euler(x, y, z) {
+            try { return U.Quaternion.method("Euler", 3).invoke(x, y, z); }
+            catch (_) { return null; }
+        }
+
+        function primitive(type, name) {
+            const go = U.GameObject.method("CreatePrimitive").invoke(type);
             try { go.method("set_name").invoke(Il2Cpp.string(name)); } catch (_) {}
             return go;
         }
 
-        function addComponent(go, klass) {
-            try { return go.method("AddComponent", 1).invoke(klass.type.object); }
-            catch (e) {
-                log("AddComponent<" + klass.name + "> failed: " + safeString(e));
-                return null;
-            }
+        function setParent(child, parent) {
+            child.method("get_transform").invoke()
+                .method("SetParent", 2)
+                .invoke(parent.method("get_transform").invoke(), false);
         }
 
-        function getPlayer() {
+        function setLocal(go, pos, scale, rot) {
+            const t = go.method("get_transform").invoke();
+            if (pos) t.method("set_localPosition").invoke(pos);
+            if (scale) t.method("set_localScale").invoke(scale);
+            if (rot) t.method("set_localRotation").invoke(rot);
+        }
+
+        function renderer(go) {
+            try { return go.method("GetComponent", 1).inflate(U.Renderer).invoke(); }
+            catch (_) { return null; }
+        }
+
+        function setColor(go, col) {
             try {
-                const value = AC.PlayerController.method("get_instance").invoke();
-                if (value && !value.handle.isNull()) return value;
+                const r = renderer(go);
+                if (!r || r.handle.isNull()) return;
+                const mat = r.method("get_material").invoke();
+                mat.method("set_color").invoke(col);
             } catch (_) {}
-            return null;
         }
 
-        function fieldObject(obj, name) {
-            try {
-                const field = obj.tryField ? obj.tryField(name) : obj.field(name);
-                if (!field) return null;
-                const value = field.value;
-                if (!value || value.handle.isNull()) return null;
-                return value;
-            } catch (_) {
-                return null;
-            }
+        function setActive(go, active) {
+            try { go.method("SetActive").invoke(active); } catch (_) {}
         }
 
-        function getHeadTransform() {
-            const player = getPlayer();
-            if (!player) return null;
-            return fieldObject(player, "headFollower") ||
-                fieldObject(player, "_headTransform") ||
-                fieldObject(player, "_cameraTransform") ||
-                fieldObject(player, "cameraTransform");
-        }
-
-        function getFont() {
-            try {
-                const fonts = U.Resources && U.Resources.method("FindObjectsOfTypeAll", 1).invoke(U.Font.type);
-                if (fonts) {
-                    for (let i = 0; i < fonts.length; i++) {
-                        const font = fonts.get(i);
-                        const name = U.Font.method("get_name").on(font).invoke().toString();
-                        if (name === "Utopium") return font;
-                    }
-                }
-            } catch (_) {}
-            try {
-                const resources = core.class("UnityEngine.Resources");
-                return resources.method("GetBuiltinResource", 1).inflate(U.Font).invoke(Il2Cpp.string("Arial.ttf"));
-            } catch (_) {
-                return null;
-            }
-        }
-
-        function callMethod(target, methodName) {
-            try {
-                const method = target.tryMethod ? target.tryMethod(methodName) : target.method(methodName);
-                return method ? method.invoke() : null;
-            } catch (_) {
-                return null;
-            }
-        }
-
-        function readField(target, fieldName) {
-            try {
-                const field = target.tryField ? target.tryField(fieldName) : target.field(fieldName);
-                return field ? field.value : null;
-            } catch (_) {
-                return null;
-            }
+        function addText(parent, text, y, z, size, col) {
+            if (!U.TextMesh) return null;
+            const go = U.GameObject.new();
+            try { go.method("set_name").invoke(Il2Cpp.string("[Orbit Label]")); } catch (_) {}
+            setParent(go, parent);
+            const tm = go.method("AddComponent", 1).invoke(U.TextMesh.type.object);
+            try { tm.method("set_text").invoke(Il2Cpp.string(text)); } catch (_) {}
+            try { tm.method("set_fontSize").invoke(size); } catch (_) {}
+            try { tm.method("set_color").invoke(col); } catch (_) {}
+            try { tm.method("set_anchor").invoke(3); } catch (_) {}
+            try { tm.method("set_alignment").invoke(0); } catch (_) {}
+            setLocal(go, vec3(-0.032, y, z), vec3(0.018, 0.018, 0.018), euler(0, 90, 0));
+            orbit.labels.push({ go: go, text: tm });
+            return tm;
         }
 
         function inputAxis(name) {
             if (!U.Input) return 0;
-            try {
-                const value = U.Input.method("GetAxis", 1).invoke(Il2Cpp.string(name));
-                return Number(value) || 0;
-            } catch (_) {
-                return 0;
-            }
+            try { return Number(U.Input.method("GetAxis", 1).invoke(Il2Cpp.string(name))) || 0; }
+            catch (_) { return 0; }
         }
 
         function inputButton(name) {
@@ -214,21 +165,8 @@
             catch (_) { return false; }
         }
 
-        function anyButton(names) {
-            for (let i = 0; i < names.length; i++) {
-                if (inputButton(names[i])) return true;
-            }
-            return false;
-        }
-
         function leftStickY() {
-            const names = [
-                "Oculus_CrossPlatform_PrimaryThumbstickVertical",
-                "PrimaryThumbstickVertical",
-                "LeftStickY",
-                "LeftVertical",
-                "Vertical",
-            ];
+            const names = ["Oculus_CrossPlatform_PrimaryThumbstickVertical", "PrimaryThumbstickVertical", "LeftStickY", "LeftVertical", "Vertical"];
             for (let i = 0; i < names.length; i++) {
                 const value = inputAxis(names[i]);
                 if (Math.abs(value) > 0.2) return value;
@@ -236,90 +174,61 @@
             return 0;
         }
 
-        function rightStickHeldDown() {
-            const axisNames = [
-                "Oculus_CrossPlatform_SecondaryThumbstickVertical",
-                "SecondaryThumbstickVertical",
-                "RightStickY",
-                "RightVertical",
-            ];
-            for (let i = 0; i < axisNames.length; i++) {
-                if (inputAxis(axisNames[i]) < -0.55) return true;
-            }
-            return anyButton(["Oculus_CrossPlatform_SecondaryThumbstick", "SecondaryThumbstick"]) ||
-                inputKey(339);
+        function yButtonDown() {
+            return inputKey(333) ||
+                inputButton("ButtonY") ||
+                inputButton("YButton") ||
+                inputButton("Oculus_CrossPlatform_SecondaryButtonLeft") ||
+                inputButton("Oculus_CrossPlatform_LeftSecondaryButton");
         }
 
         function bButtonDown() {
-            return anyButton(["Oculus_CrossPlatform_SecondaryButton", "SecondaryButton", "ButtonB"]) ||
-                inputKey(331);
+            return inputKey(331) ||
+                inputButton("ButtonB") ||
+                inputButton("BButton") ||
+                inputButton("Oculus_CrossPlatform_SecondaryButtonRight") ||
+                inputButton("Oculus_CrossPlatform_RightSecondaryButton");
         }
 
-        function currentItems() {
-            if (orbit.page === "main") {
-                return orbit.buttonLabels.map(function (name) {
-                    return { label: name, type: "tab", target: name.toLowerCase(), color: "#ffffff" };
-                });
-            }
-            if (orbit.page === "movement") {
-                return [
-                    { label: "Fly", type: "locked", color: "#888888" },
-                    { label: "Platforms", type: "locked", color: "#888888" },
-                    { label: "Back", type: "back", color: "#ff4444" },
-                ];
-            }
-            return [
-                { label: "Back", type: "back", color: "#ff4444" },
-            ];
+        function getPlayer() {
+            try {
+                const value = AC.PlayerController.method("get_instance").invoke();
+                if (value && !value.handle.isNull()) return value;
+            } catch (_) {}
+            return null;
         }
 
-        function clampCursor() {
-            const items = currentItems();
-            if (orbit.cursor < 0) orbit.cursor = items.length - 1;
-            if (orbit.cursor >= items.length) orbit.cursor = 0;
+        function fieldObject(obj, name) {
+            try {
+                const f = obj.tryField ? obj.tryField(name) : obj.field(name);
+                if (!f) return null;
+                const v = f.value;
+                if (!v || v.handle.isNull()) return null;
+                return v;
+            } catch (_) { return null; }
         }
 
-        function selectCurrentItem() {
-            const items = currentItems();
-            const item = items[orbit.cursor];
-            if (!item) return;
-            if (item.type === "back") {
-                orbit.page = "main";
-                orbit.cursor = 0;
-            } else if (item.type === "tab") {
-                orbit.page = item.target;
-                orbit.cursor = 0;
-            } else if (item.type === "locked") {
-                log(item.label + " is disabled in multiplayer builds.");
-            }
-            orbit.lastText = "";
+        function getHeadTransform() {
+            const player = getPlayer();
+            if (!player) return null;
+            return fieldObject(player, "headFollower") ||
+                fieldObject(player, "_headTransform") ||
+                fieldObject(player, "_cameraTransform") ||
+                fieldObject(player, "cameraTransform");
         }
 
-        function updateMenuInput() {
-            orbit.menuHeld = rightStickHeldDown();
-            if (!orbit.menuHeld) {
-                orbit.lastMenuHeld = false;
-                orbit.lastSelectDown = false;
-                return;
-            }
+        function callMethod(target, methodName) {
+            try {
+                const method = target.tryMethod ? target.tryMethod(methodName) : target.method(methodName);
+                return method ? method.invoke() : null;
+            } catch (_) { return null; }
+        }
 
-            if (!orbit.lastMenuHeld) {
-                orbit.lastText = "";
-                orbit.lastMoveTick = -999999;
-            }
-            orbit.lastMenuHeld = true;
-
-            const y = leftStickY();
-            if (Math.abs(y) > 0.55 && orbit.tickCount - orbit.lastMoveTick >= INPUT_REPEAT_TICKS) {
-                orbit.cursor += y > 0 ? -1 : 1;
-                clampCursor();
-                orbit.lastMoveTick = orbit.tickCount;
-                orbit.lastText = "";
-            }
-
-            const selectDown = bButtonDown();
-            if (selectDown && !orbit.lastSelectDown) selectCurrentItem();
-            orbit.lastSelectDown = selectDown;
+        function readField(target, fieldName) {
+            try {
+                const field = target.tryField ? target.tryField(fieldName) : target.field(fieldName);
+                return field ? field.value : null;
+            } catch (_) { return null; }
         }
 
         function jsString(value) {
@@ -344,68 +253,40 @@
             if (Photon.resolved) return true;
             if (orbit.tickCount - Photon.lastResolveTick < PHOTON_SCAN_TICKS) return false;
             Photon.lastResolveTick = orbit.tickCount;
-            Photon.PhotonNetworkClass = tryClass([
-                "PhotonUnityNetworking",
-                "PhotonRealtime",
-                "Assembly-CSharp",
-                "AnimalCompany",
-            ], "Photon.Pun.PhotonNetwork");
+            Photon.PhotonNetworkClass = tryClass(["PhotonUnityNetworking", "PhotonRealtime", "Assembly-CSharp", "AnimalCompany"], "Photon.Pun.PhotonNetwork");
             Photon.resolved = !!Photon.PhotonNetworkClass;
             if (Photon.resolved) log("PhotonNetwork class resolved");
             return Photon.resolved;
         }
 
-        function readPlayerName(player, index) {
-            const methodNames = ["get_NickName", "get_UserId"];
-            const fieldNames = ["NickName", "nickName", "UserId", "userId"];
-            for (let i = 0; i < methodNames.length; i++) {
-                const value = jsString(callMethod(player, methodNames[i])).trim();
-                if (value) return value;
-            }
-            for (let i = 0; i < fieldNames.length; i++) {
-                const value = jsString(readField(player, fieldNames[i])).trim();
-                if (value) return value;
-            }
-            const actor = callMethod(player, "get_ActorNumber") || readField(player, "ActorNumber") || readField(player, "actorNumber");
-            return actor != null ? "Player " + actor : "Player " + (index + 1);
-        }
-
-        function readPlayerIsLocal(player) {
-            return callMethod(player, "get_IsLocal") === true || readField(player, "IsLocal") === true || readField(player, "isLocal") === true;
-        }
-
         function refreshPhotonPlayers() {
             if (orbit.tickCount - orbit.lastPhotonScan < PHOTON_SCAN_TICKS) return;
             orbit.lastPhotonScan = orbit.tickCount;
-
             if (!resolvePhoton()) {
                 orbit.photonStatus = "Photon: resolving";
                 orbit.photonPlayerNames = [];
                 return;
             }
-
             try {
                 if (callMethod(Photon.PhotonNetworkClass, "get_InRoom") === false) {
                     orbit.photonStatus = "Photon: not in room";
                     orbit.photonPlayerNames = [];
                     return;
                 }
-
                 const players = callMethod(Photon.PhotonNetworkClass, "get_PlayerList");
                 if (!players || typeof players.length !== "number") {
                     orbit.photonStatus = "Photon: player list unavailable";
                     orbit.photonPlayerNames = [];
                     return;
                 }
-
                 const names = [];
-                const count = Math.min(players.length, 16);
+                const count = Math.min(players.length, 10);
                 for (let i = 0; i < count; i++) {
                     const player = players.get(i);
-                    if (!player) continue;
-                    let name = readPlayerName(player, i);
-                    if (name.length > 24) name = name.slice(0, 21) + "...";
-                    names.push(name + (readPlayerIsLocal(player) ? " (you)" : ""));
+                    let name = jsString(callMethod(player, "get_NickName") || readField(player, "NickName") || callMethod(player, "get_UserId")).trim();
+                    if (!name) name = "Player " + (i + 1);
+                    if (name.length > 18) name = name.slice(0, 15) + "...";
+                    names.push(name);
                 }
                 orbit.photonPlayerNames = names;
                 orbit.photonStatus = names.length ? "Photon Players (" + names.length + ")" : "Photon: no players found";
@@ -416,119 +297,154 @@
             }
         }
 
-        function renderMenuText() {
-            refreshPhotonPlayers();
-            const lines = [
-                "<color=#bb88ff>Orbit Menu V" + VERSION + "</color>",
-                orbit.page === "main" ? "<color=#888888>tabs</color>" : "<color=#888888>" + orbit.page + "</color>",
-                "",
+        function currentItems() {
+            if (orbit.page === "main") return tabs.map(function (name) { return { label: name, type: "tab", target: name.toLowerCase(), locked: false }; });
+            if (orbit.page === "movement") return [
+                { label: "Fly", type: "locked", locked: true },
+                { label: "Platforms", type: "locked", locked: true },
+                { label: "Back", type: "back", locked: false },
             ];
-
-            const items = currentItems();
-            clampCursor();
-            for (let i = 0; i < items.length; i++) {
-                const item = items[i];
-                const cursor = i === orbit.cursor ? "<color=#ffcc00>></color> " : "  ";
-                lines.push(cursor + "<color=" + item.color + ">[ " + item.label + " ]</color>");
-                if (item.type === "locked") lines.push("    <color=#777777>disabled</color>");
-            }
-
-            lines.push("");
-            lines.push("<color=#88ccff>" + orbit.photonStatus + "</color>");
-            if (orbit.photonPlayerNames.length) {
-                for (let i = 0; i < orbit.photonPlayerNames.length; i++) lines.push("  - " + orbit.photonPlayerNames[i]);
-            } else {
-                lines.push("  waiting...");
-            }
-            return lines.join("\n");
+            return [{ label: "Back", type: "back", locked: false }];
         }
 
-        function updateText() {
-            if (!orbit.text) return;
-            const next = orbit.menuHeld ? renderMenuText() : "";
-            if (next === orbit.lastText) return;
-            orbit.lastText = next;
-            orbit.text.method("set_text").invoke(Il2Cpp.string(next));
+        function clampCursor() {
+            const items = currentItems();
+            if (orbit.cursor < 0) orbit.cursor = items.length - 1;
+            if (orbit.cursor >= items.length) orbit.cursor = 0;
+        }
+
+        function selectCurrent() {
+            const item = currentItems()[orbit.cursor];
+            if (!item) return;
+            if (item.type === "tab") {
+                orbit.page = item.target;
+                orbit.cursor = 0;
+            } else if (item.type === "back") {
+                orbit.page = "main";
+                orbit.cursor = 0;
+            } else if (item.type === "locked") {
+                log(item.label + " is disabled in multiplayer builds.");
+            }
+            rebuildRows();
+        }
+
+        function destroyRows() {
+            const all = orbit.rows.concat(orbit.labels.map(function (l) { return l.go; }));
+            for (let i = 0; i < all.length; i++) {
+                try { U.Object.method("Destroy", 1).invoke(all[i]); } catch (_) {}
+            }
+            orbit.rows = [];
+            orbit.labels = [];
+        }
+
+        function rowColor(item, selected) {
+            if (item.type === "back") return selected ? color(1, 0.12, 0.12, 1) : color(0.55, 0.02, 0.02, 1);
+            if (item.locked) return selected ? color(0.38, 0.38, 0.38, 1) : color(0.18, 0.18, 0.18, 1);
+            return selected ? color(0.95, 0.72, 0.08, 1) : color(0.08, 0.09, 0.12, 1);
+        }
+
+        function rebuildRows() {
+            if (!orbit.root) return;
+            destroyRows();
+            refreshPhotonPlayers();
+
+            addText(orbit.root, "Orbit V" + VERSION + "  " + (orbit.page === "main" ? "Tabs" : orbit.page), 0.0, 0.215, 34, color(0.74, 0.53, 1, 1));
+            const items = currentItems();
+            clampCursor();
+
+            const startZ = 0.13;
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                const z = startZ - i * 0.075;
+                const row = primitive(3, "[Orbit Button] " + item.label);
+                setParent(row, orbit.root);
+                setLocal(row, vec3(-0.006, 0, z), vec3(0.028, 0.36, 0.048), null);
+                setColor(row, rowColor(item, i === orbit.cursor));
+                orbit.rows.push(row);
+                addText(orbit.root, (i === orbit.cursor ? "> " : "  ") + item.label + (item.locked ? "  locked" : ""), -0.145, z + 0.01, 30, item.type === "back" ? color(1, 0.2, 0.2, 1) : color(1, 1, 1, 1));
+            }
+
+            addText(orbit.root, orbit.photonStatus, -0.16, -0.21, 22, color(0.5, 0.82, 1, 1));
+            for (let i = 0; i < Math.min(orbit.photonPlayerNames.length, 3); i++) {
+                addText(orbit.root, "- " + orbit.photonPlayerNames[i], -0.16, -0.25 - i * 0.035, 18, color(0.85, 0.92, 1, 1));
+            }
         }
 
         function buildMenu() {
-            if (orbit.menuInited) return;
+            if (orbit.root) return;
 
-            const root = newGameObject("[Orbit Root]");
-            const canvasGO = newGameObject("[Orbit Canvas]");
-            canvasGO.method("get_transform").invoke().method("SetParent", 2).invoke(root.method("get_transform").invoke(), false);
+            const root = U.GameObject.new();
+            root.method("set_name").invoke(Il2Cpp.string("[Orbit Cube Menu]"));
 
-            const canvas = addComponent(canvasGO, U.Canvas);
-            if (!canvas || canvas.handle.isNull()) throw new Error("Canvas component returned null");
-            canvas.method("set_renderMode").invoke(2);
-            if (U.CanvasScaler) addComponent(canvasGO, U.CanvasScaler);
-            if (U.GraphicRaycaster) addComponent(canvasGO, U.GraphicRaycaster);
+            const panel = primitive(3, "[Orbit Panel]");
+            setParent(panel, root);
+            setLocal(panel, vec3(0, 0, 0), vec3(0.035, 0.43, 0.53), null);
+            setColor(panel, color(0.015, 0.016, 0.02, 0.96));
 
-            const textGO = newGameObject("[Orbit Text]");
-            textGO.method("get_transform").invoke().method("SetParent", 2).invoke(canvasGO.method("get_transform").invoke(), false);
-
-            const label = addComponent(textGO, U.Text);
-            if (!label || label.handle.isNull()) throw new Error("Text component returned null");
-
-            const font = getFont();
-            if (font) label.method("set_font").invoke(font);
-            label.method("set_supportRichText").invoke(true);
-            label.method("set_text").invoke(Il2Cpp.string(renderMenuText()));
-            label.method("set_color").invoke(color(1, 1, 1, 1));
-            label.method("set_fontSize").invoke(24);
-            label.method("set_alignment").invoke(0);
-            label.method("set_resizeTextForBestFit").invoke(false);
-            label.method("set_fontStyle").invoke(1);
-
-            try {
-                const rect = textGO.method("GetComponent", 1).inflate(U.RectTransform).invoke();
-                if (rect && !rect.handle.isNull()) {
-                    rect.method("set_anchorMin").invoke(vec2(0, 1));
-                    rect.method("set_anchorMax").invoke(vec2(0, 1));
-                    rect.method("set_pivot").invoke(vec2(0, 1));
-                    rect.method("set_anchoredPosition").invoke(vec2(-250, 145));
-                    rect.method("set_sizeDelta").invoke(vec2(620, 440));
-                }
-            } catch (e) { log("RectTransform setup skipped: " + safeString(e)); }
-
-            root.method("get_transform").invoke().method("set_localScale").invoke(vec3(MENU_SCALE, MENU_SCALE, MENU_SCALE));
-            U.Object.method("DontDestroyOnLoad").invoke(root);
+            const trim = primitive(3, "[Orbit Trim]");
+            setParent(trim, root);
+            setLocal(trim, vec3(0.006, 0, 0), vec3(0.018, 0.46, 0.56), null);
+            setColor(trim, color(0.38, 0.22, 0.82, 1));
 
             orbit.root = root;
-            orbit.text = label;
-            orbit.menuInited = true;
-            log("menu built: " + root.handle.toString());
+            rebuildRows();
+            setActive(root, false);
+            log("cube menu built: " + root.handle.toString());
         }
 
         function placeMenu() {
             if (!orbit.root) return;
             const head = getHeadTransform();
             if (!head) return;
-
             try {
                 const hp = head.method("get_position").invoke();
                 const hf = head.method("get_forward").invoke();
-                const rootTransform = orbit.root.method("get_transform").invoke();
-
+                const t = orbit.root.method("get_transform").invoke();
                 const x = hp.field("x").value + hf.field("x").value * MENU_DISTANCE;
                 const y = hp.field("y").value + hf.field("y").value * MENU_DISTANCE - MENU_DOWN;
                 const z = hp.field("z").value + hf.field("z").value * MENU_DISTANCE;
-                rootTransform.method("set_position").invoke(vec3(x, y, z));
-
-                try { rootTransform.method("set_rotation").invoke(head.method("get_rotation").invoke()); } catch (_) {}
+                t.method("set_position").invoke(vec3(x, y, z));
+                try { t.method("set_rotation").invoke(head.method("get_rotation").invoke()); } catch (_) {}
                 orbit.lastVisiblePosition = x.toFixed(2) + "," + y.toFixed(2) + "," + z.toFixed(2);
             } catch (e) {
                 log("placeMenu failed: " + safeString(e));
             }
         }
 
+        function updateInput() {
+            const toggleDown = yButtonDown();
+            if (toggleDown && !orbit.lastToggleDown) {
+                orbit.visible = !orbit.visible;
+                if (orbit.root) setActive(orbit.root, orbit.visible);
+                if (orbit.visible) rebuildRows();
+                log("cube menu " + (orbit.visible ? "opened" : "closed"));
+            }
+            orbit.lastToggleDown = toggleDown;
+
+            if (!orbit.visible) {
+                orbit.lastSelectDown = false;
+                return;
+            }
+
+            const y = leftStickY();
+            if (Math.abs(y) > 0.55 && orbit.tickCount - orbit.lastMoveTick >= INPUT_REPEAT_TICKS) {
+                orbit.cursor += y > 0 ? -1 : 1;
+                clampCursor();
+                orbit.lastMoveTick = orbit.tickCount;
+                rebuildRows();
+            }
+
+            const selectDown = bButtonDown();
+            if (selectDown && !orbit.lastSelectDown) selectCurrent();
+            orbit.lastSelectDown = selectDown;
+        }
+
         function onTick() {
             orbit.tickCount++;
             try {
-                if (!orbit.menuInited) buildMenu();
-                placeMenu();
-                updateMenuInput();
-                updateText();
+                buildMenu();
+                updateInput();
+                if (orbit.visible) placeMenu();
             } catch (e) {
                 log("menu tick failed: " + safeString(e));
             }
@@ -536,11 +452,9 @@
             if (orbit.tickCount - orbit.lastLog >= LOG_TICKS) {
                 orbit.lastLog = orbit.tickCount;
                 log("tick " + orbit.tickCount +
-                    " inited=" + orbit.menuInited +
-                    " pos=" + orbit.lastVisiblePosition +
-                    " held=" + orbit.menuHeld +
+                    " cube=true visible=" + orbit.visible +
                     " page=" + orbit.page +
-                    " players=" + orbit.photonPlayerNames.length);
+                    " pos=" + orbit.lastVisiblePosition);
             }
         }
 
@@ -551,7 +465,6 @@
                 log("error: no GorillaLocomotion OnUpdate/FixedUpdate method found");
                 return;
             }
-
             Interceptor.attach(target.virtualAddress, {
                 onEnter: function () {
                     try { onTick(); }
