@@ -64,6 +64,7 @@ Il2Cpp.perform(() => {
         lastMenuText: "",
         inputReady: false,
         inputError: null,
+        headWaitLog: 0,
     };
 
     function log(msg) { console.log("[Orbit] " + msg); }
@@ -408,7 +409,15 @@ Il2Cpp.perform(() => {
             }
 
             const head = headTransform();
-            if (!head) { log("initMenu: no head yet"); return; }
+            if (!head) {
+                if (orbit.tickCount - orbit.headWaitLog >= 300) {
+                    orbit.headWaitLog = orbit.tickCount;
+                    const pi = playerInst();
+                    log("waiting for head... playerInst=" + (pi ? "OK" : "null") +
+                        (pi ? " headFollower=" + (function(){ try { const v = pi.field("headFollower").value; return v && !v.handle.isNull() ? "OK" : "null"; } catch(e) { return "err:" + e; } })() : ""));
+                }
+                return;
+            }
 
             log("building menu...");
 
