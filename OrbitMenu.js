@@ -6,12 +6,13 @@
 (function () {
     "use strict";
 
-    const VERSION = "3.3";
+    const VERSION = "3.4";
     const LOG_TICKS = 300;
     const PHOTON_SCAN_TICKS = 120;
-    const MENU_DISTANCE = 0.72;
-    const MENU_DOWN = 0.08;
-    const MENU_SCALE = 0.0017;
+    const INPUT_REPEAT_TICKS = 14;
+    const MENU_DISTANCE = 0.95;
+    const MENU_DOWN = 0.04;
+    const MENU_SCALE = 0.00072;
 
     const U = {};
     const AC = {};
@@ -48,6 +49,12 @@
         U.CanvasScaler = ui.tryClass("UnityEngine.UI.CanvasScaler");
         U.GraphicRaycaster = ui.tryClass("UnityEngine.UI.GraphicRaycaster");
         U.Font = text.class("UnityEngine.Font");
+        try {
+            const inputLegacy = Il2Cpp.domain.tryAssembly("UnityEngine.InputLegacyModule");
+            U.Input = inputLegacy ? inputLegacy.image.tryClass("UnityEngine.Input") : core.tryClass("UnityEngine.Input");
+        } catch (_) {
+            U.Input = null;
+        }
         AC.PlayerController = animal.class("AnimalCompany.PlayerController");
         AC.GorillaLocomotion = animal.class("AnimalCompany.GorillaLocomotion");
 
@@ -59,6 +66,11 @@
             root: null,
             text: null,
             cursor: 0,
+            page: "main",
+            menuHeld: false,
+            lastMoveTick: -999999,
+            lastSelectDown: false,
+            lastMenuHeld: false,
             buttonLabels: ["Status", "Movement", "Visuals", "Player", "Settings"],
             photonPlayerNames: [],
             photonStatus: "Photon: waiting",
@@ -74,6 +86,7 @@
             orbit.buttonLabels = ["Status", "Movement", "Visuals", "Player", "Settings"];
         }
         if (!Array.isArray(orbit.photonPlayerNames)) orbit.photonPlayerNames = [];
+        if (typeof orbit.page !== "string") orbit.page = "main";
 
         function vec2(x, y) {
             const v = U.Vector2.alloc();
@@ -179,6 +192,136 @@
             }
         }
 
+        function inputAxis(name) {
+            if (!U.Input) return 0;
+            try {
+                const value = U.Input.method("GetAxis", 1).invoke(Il2Cpp.string(name));
+                return Number(value) || 0;
+            } catch (_) {
+                return 0;
+            }
+        }
+
+        function inputButton(name) {
+            if (!U.Input) return false;
+            try { return U.Input.method("GetButton", 1).invoke(Il2Cpp.string(name)) === true; }
+            catch (_) { return false; }
+        }
+
+        function inputKey(keyCode) {
+            if (!U.Input) return false;
+            try { return U.Input.method("GetKey", 1).invoke(keyCode) === true; }
+            catch (_) { return false; }
+        }
+
+        function anyButton(names) {
+            for (let i = 0; i < names.length; i++) {
+                if (inputButton(names[i])) return true;
+            }
+            return false;
+        }
+
+        function leftStickY() {
+            const names = [
+                "Oculus_CrossPlatform_PrimaryThumbstickVertical",
+                "PrimaryThumbstickVertical",
+                "LeftStickY",
+                "LeftVertical",
+                "Vertical",
+            ];
+            for (let i = 0; i < names.length; i++) {
+                const value = inputAxis(names[i]);
+                if (Math.abs(value) > 0.2) return value;
+            }
+            return 0;
+        }
+
+        function rightStickHeldDown() {
+            const axisNames = [
+                "Oculus_CrossPlatform_SecondaryThumbstickVertical",
+                "SecondaryThumbstickVertical",
+                "RightStickY",
+                "RightVertical",
+            ];
+            for (let i = 0; i < axisNames.length; i++) {
+                if (inputAxis(axisNames[i]) < -0.55) return true;
+            }
+            return anyButton(["Oculus_CrossPlatform_SecondaryThumbstick", "SecondaryThumbstick"]) ||
+                inputKey(339);
+        }
+
+        function bButtonDown() {
+            return anyButton(["Oculus_CrossPlatform_SecondaryButton", "SecondaryButton", "ButtonB"]) ||
+                inputKey(331);
+        }
+
+        function currentItems() {
+            if (orbit.page === "main") {
+                return orbit.buttonLabels.map(function (name) {
+                    return { label: name, type: "tab", target: name.toLowerCase(), color: "#ffffff" };
+                });
+            }
+            if (orbit.page === "movement") {
+                return [
+                    { label: "Fly", type: "locked", color: "#888888" },
+                    { label: "Platforms", type: "locked", color: "#888888" },
+                    { label: "Back", type: "back", color: "#ff4444" },
+                ];
+            }
+            return [
+                { label: "Back", type: "back", color: "#ff4444" },
+            ];
+        }
+
+        function clampCursor() {
+            const items = currentItems();
+            if (orbit.cursor < 0) orbit.cursor = items.length - 1;
+            if (orbit.cursor >= items.length) orbit.cursor = 0;
+        }
+
+        function selectCurrentItem() {
+            const items = currentItems();
+            const item = items[orbit.cursor];
+            if (!item) return;
+            if (item.type === "back") {
+                orbit.page = "main";
+                orbit.cursor = 0;
+            } else if (item.type === "tab") {
+                orbit.page = item.target;
+                orbit.cursor = 0;
+            } else if (item.type === "locked") {
+                log(item.label + " is disabled in multiplayer builds.");
+            }
+            orbit.lastText = "";
+        }
+
+        function updateMenuInput() {
+            orbit.menuHeld = rightStickHeldDown();
+            if (!orbit.menuHeld) {
+                orbit.lastMenuHeld = false;
+                orbit.lastSelectDown = false;
+                return;
+            }
+
+            if (!orbit.lastMenuHeld) {
+                orbit.lastText = "";
+                orbit.lastMoveTick = -999999;
+            }
+            orbit.lastMenuHeld = true;
+
+            const y = leftStickY();
+            if (Math.abs(y) > 0.55 && orbit.tickCount - orbit.lastMoveTick >= INPUT_REPEAT_TICKS) {
+                orbit.cursor += y > 0 ? -1 : 1;
+                clampCursor();
+                orbit.lastMoveTick = orbit.tickCount;
+                orbit.lastText = "";
+            }
+
+            const selectDown = bButtonDown();
+            if (selectDown && !orbit.lastSelectDown) selectCurrentItem();
+            orbit.lastSelectDown = selectDown;
+        }
+
         function jsString(value) {
             if (value == null) return "";
             try { if (value.handle && value.handle.isNull()) return ""; } catch (_) {}
@@ -277,13 +420,17 @@
             refreshPhotonPlayers();
             const lines = [
                 "<color=#bb88ff>Orbit Menu V" + VERSION + "</color>",
-                "<color=#88ff88>visible test panel</color>",
+                orbit.page === "main" ? "<color=#888888>tabs</color>" : "<color=#888888>" + orbit.page + "</color>",
                 "",
             ];
 
-            for (let i = 0; i < orbit.buttonLabels.length; i++) {
+            const items = currentItems();
+            clampCursor();
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
                 const cursor = i === orbit.cursor ? "<color=#ffcc00>></color> " : "  ";
-                lines.push(cursor + "[ " + orbit.buttonLabels[i] + " ]");
+                lines.push(cursor + "<color=" + item.color + ">[ " + item.label + " ]</color>");
+                if (item.type === "locked") lines.push("    <color=#777777>disabled</color>");
             }
 
             lines.push("");
@@ -298,7 +445,7 @@
 
         function updateText() {
             if (!orbit.text) return;
-            const next = renderMenuText();
+            const next = orbit.menuHeld ? renderMenuText() : "";
             if (next === orbit.lastText) return;
             orbit.lastText = next;
             orbit.text.method("set_text").invoke(Il2Cpp.string(next));
@@ -328,7 +475,7 @@
             label.method("set_supportRichText").invoke(true);
             label.method("set_text").invoke(Il2Cpp.string(renderMenuText()));
             label.method("set_color").invoke(color(1, 1, 1, 1));
-            label.method("set_fontSize").invoke(42);
+            label.method("set_fontSize").invoke(24);
             label.method("set_alignment").invoke(0);
             label.method("set_resizeTextForBestFit").invoke(false);
             label.method("set_fontStyle").invoke(1);
@@ -339,8 +486,8 @@
                     rect.method("set_anchorMin").invoke(vec2(0, 1));
                     rect.method("set_anchorMax").invoke(vec2(0, 1));
                     rect.method("set_pivot").invoke(vec2(0, 1));
-                    rect.method("set_anchoredPosition").invoke(vec2(-360, 220));
-                    rect.method("set_sizeDelta").invoke(vec2(900, 700));
+                    rect.method("set_anchoredPosition").invoke(vec2(-250, 145));
+                    rect.method("set_sizeDelta").invoke(vec2(620, 440));
                 }
             } catch (e) { log("RectTransform setup skipped: " + safeString(e)); }
 
@@ -380,6 +527,7 @@
             try {
                 if (!orbit.menuInited) buildMenu();
                 placeMenu();
+                updateMenuInput();
                 updateText();
             } catch (e) {
                 log("menu tick failed: " + safeString(e));
@@ -390,6 +538,8 @@
                 log("tick " + orbit.tickCount +
                     " inited=" + orbit.menuInited +
                     " pos=" + orbit.lastVisiblePosition +
+                    " held=" + orbit.menuHeld +
+                    " page=" + orbit.page +
                     " players=" + orbit.photonPlayerNames.length);
             }
         }
