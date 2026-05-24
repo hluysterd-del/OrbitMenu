@@ -1,11 +1,12 @@
 // ====================================================================
-//  Orbit Menu V5.0 — Animal Company
-//  Controller input, tabs, fly, platforms, orbit-all.
-//  Proven IL2CPP bridge patterns from the working V3.0 build.
+//  Orbit Menu V6.0 — Animal Company
+//  Controller input, tabs, fly, platforms, orbit-all + OP features.
+//  OP features ported from ACCompanion: TP All, Yeet, Stink, Jellify,
+//  Color, Void, Fling, Money.
 // ====================================================================
 
 Il2Cpp.perform(() => {
-    console.log("[Orbit] ===== Orbit Menu V5.0 LOADING =====");
+    console.log("[Orbit] ===== Orbit Menu V6.0 LOADING =====");
 
     // ---- assemblies ----
     const acImage    = Il2Cpp.domain.assembly("AnimalCompany").image;
@@ -30,7 +31,7 @@ Il2Cpp.perform(() => {
     const NetPlayerClass         = acImage.class("AnimalCompany.NetPlayer");
 
     // ---- state ----
-    // Force-reset state on reload so stale handles don't stick
+    // Force-reset on reload so stale handles don't stick
     globalThis.orbit = {
         tick: 0,
         hookInstalled: false,
@@ -60,6 +61,10 @@ Il2Cpp.perform(() => {
         // orbit-all
         orbitAngle: 0,
 
+        // action flash (shows result text briefly)
+        actionMsg: "",
+        actionTick: 0,
+
         // logging
         lastLog: 0,
         lastText: "",
@@ -88,18 +93,13 @@ Il2Cpp.perform(() => {
         return null;
     }
 
-    // Use the property getter — the field name in the dump is _headTransform
-    // but V3 used "headFollower" which does not exist. get_head() is the safe
-    // accessor that returns the actual camera/head Transform.
     function headTf() {
         const p = playerInst();
         if (!p) return null;
-        // Try property first (safest)
         try {
             const h = p.method("get_head").invoke();
             if (h && !h.handle.isNull()) return h;
         } catch (_) {}
-        // Fallback: try field names the bridge might accept
         for (const n of ["_headTransform", "_cameraTransform", "headFollower"]) {
             try {
                 const v = p.field(n).value;
@@ -141,6 +141,43 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
+    //  PLAYER ITERATION — ported from ACCompanion
+    // ================================================================
+    // Calls fn(netPlayer) on every non-local player. Returns count affected.
+    function forEachOtherPlayer(fn) {
+        try {
+            const allPlayers = NetPlayerClass.method("get_spawnedPlayers").invoke();
+            if (!allPlayers || allPlayers.handle.isNull()) return 0;
+            const localP = NetPlayerClass.method("get_localPlayer").invoke();
+
+            let count = 0;
+            try { count = allPlayers.method("get_Count").invoke(); } catch(_) { return 0; }
+
+            let affected = 0;
+            for (let i = 0; i < count; i++) {
+                let np;
+                try { np = allPlayers.method("get_Item").invoke(i); } catch(_) { continue; }
+                if (!np || np.handle.isNull()) continue;
+
+                // Skip local player — try get_IsMine() first (ACCompanion pattern)
+                try {
+                    if (np.method("get_IsMine").invoke()) continue;
+                } catch(_) {
+                    if (localP && np.handle.toString() === localP.handle.toString()) continue;
+                }
+
+                try { fn(np); affected++; } catch(e) {
+                    if (O.tick % 300 === 0) log("forEachOther err: " + e);
+                }
+            }
+            return affected;
+        } catch(e) {
+            if (O.tick % 300 === 0) log("forEachOtherPlayer err: " + e);
+            return 0;
+        }
+    }
+
+    // ================================================================
     //  XR INPUT
     // ================================================================
     function joyY(hand) {
@@ -163,10 +200,106 @@ Il2Cpp.perform(() => {
     }
 
     function bBtn(hand) {
-        // Try secondary-button via GetButtonDown(hand, 1)
         try { const v = XRInputManagerClass.method("GetButtonDown").invoke(hand, 1); return !!v; } catch(_){}
-        // fallback: right trigger
         return trigger(hand);
+    }
+
+    // ================================================================
+    //  OP ACTIONS — ported from ACCompanion RPCs
+    // ================================================================
+    function flashAction(msg) {
+        O.actionMsg = msg;
+        O.actionTick = O.tick;
+        log(msg);
+    }
+
+    // TP All to Me — RPC_Teleport(Vector3)
+    function actTpAllToMe() {
+        const myPos = readPos(headTf());
+        if (!myPos) { flashAction("no head pos"); return; }
+        let n = 0;
+        // Try RPC first
+        forEachOtherPlayer(np => {
+            try { np.method("RPC_Teleport", 1).invoke([myPos.x, myPos.y, myPos.z]); n++; } catch(_) {
+                // Fallback: direct transform set
+                try {
+                    const tf = np.method("get_transform").invoke();
+                    if (tf && !tf.handle.isNull()) tf.method("set_position").invoke([myPos.x, myPos.y, myPos.z]);
+                    n++;
+                } catch(_2) {}
+            }
+        });
+        flashAction("TP'd " + n + " players to you!");
+    }
+
+    // Yeet All — RPC_AddForce(Vector3) upward
+    function actYeetAll() {
+        let n = forEachOtherPlayer(np => {
+            np.method("RPC_AddForce", 1).invoke([0, 50.0, 0]);
+        });
+        flashAction("Yeeted " + n + " players!");
+    }
+
+    // Stink All — RPC_TagAsStinky()
+    function actStinkAll() {
+        let n = forEachOtherPlayer(np => {
+            np.method("RPC_TagAsStinky", 0).invoke();
+        });
+        flashAction("Stinked " + n + " players!");
+    }
+
+    // Jellify All — RPC_Jellify(float duration, float strength)
+    function actJellifyAll() {
+        let n = forEachOtherPlayer(np => {
+            np.method("RPC_Jellify", 2).invoke(10.0, 1.0);
+        });
+        flashAction("Jellified " + n + " players!");
+    }
+
+    // Color All — RPC_SetColorHSV(float h, float s, float v) random colors
+    function actColorAll() {
+        let n = forEachOtherPlayer(np => {
+            const h = Math.random() * 360;
+            // Try 3-param first, then 4-param
+            try { np.method("RPC_SetColorHSV", 3).invoke(h, 1.0, 1.0); } catch(_) {
+                try { np.method("RPC_SetColorHSV", 4).invoke(h, 1.0, 1.0, 1.0); } catch(_2) {
+                    np.method("RPC_SetColorHSV").invoke(h, 1.0, 1.0);
+                }
+            }
+        });
+        flashAction("Colored " + n + " players!");
+    }
+
+    // Fling All Up — RPC_AddForce with massive upward force
+    function actFlingAll() {
+        let n = forEachOtherPlayer(np => {
+            try { np.method("RPC_AddForce", 1).invoke([0, 80.0, 0]); } catch(_) {
+                // Fallback: RPC_Teleport to Y=100
+                try { np.method("RPC_Teleport", 1).invoke([0, 100.0, 0]); } catch(_2) {}
+            }
+        });
+        flashAction("Flung " + n + " players!");
+    }
+
+    // Void All — RPC_Teleport to Y=-500
+    function actVoidAll() {
+        let n = forEachOtherPlayer(np => {
+            try { np.method("RPC_Teleport", 1).invoke([0, -500.0, 0]); } catch(_) {
+                try {
+                    const tf = np.method("get_transform").invoke();
+                    if (tf && !tf.handle.isNull()) tf.method("set_position").invoke([0, -500.0, 0]);
+                } catch(_2) {}
+            }
+        });
+        flashAction("Voided " + n + " players!");
+    }
+
+    // Money All — RPC_AddPlayerMoney(int)
+    function actMoneyAll() {
+        let n = forEachOtherPlayer(np => {
+            np.method("RPC_AddPlayerMoney", 1).invoke(99999);
+        });
+        flashAction("$99999 to " + n + " players!");
     }
 
     // ================================================================
@@ -189,8 +322,16 @@ Il2Cpp.perform(() => {
             {l:"Random Item Gun", t:"tog", k:"itemGunOn"},
         ];
         case "op": return [
-            {l:"< Back",    t:"back"},
-            {l:"Orbit All", t:"tog", k:"orbitAllOn"},
+            {l:"< Back",       t:"back"},
+            {l:"Orbit All",    t:"tog", k:"orbitAllOn"},
+            {l:"TP All to Me", t:"act", fn: actTpAllToMe},
+            {l:"Yeet All",     t:"act", fn: actYeetAll},
+            {l:"Stink All",    t:"act", fn: actStinkAll},
+            {l:"Jellify All",  t:"act", fn: actJellifyAll},
+            {l:"Color All",    t:"act", fn: actColorAll},
+            {l:"Fling All Up", t:"act", fn: actFlingAll},
+            {l:"Void All",     t:"act", fn: actVoidAll},
+            {l:"Money All",    t:"act", fn: actMoneyAll},
         ];
         default: return [];
         }
@@ -217,10 +358,16 @@ Il2Cpp.perform(() => {
                                 : " <color=#ff4444>[OFF]</color>";
             } else if (it.t === "tab") {
                 txt += " ▸";
+            } else if (it.t === "act") {
+                txt = "<color=#ffaa44>" + txt + "</color>";
             }
             L.push(cur + txt);
         }
         L.push("");
+        // Show action result flash for 3 seconds (~180 ticks)
+        if (O.actionMsg && (O.tick - O.actionTick) < 180) {
+            L.push("<color=#00ffaa>" + O.actionMsg + "</color>");
+        }
         L.push("<color=#888888>Stick↑↓ nav   B=select</color>");
         return L.join("\n");
     }
@@ -229,7 +376,6 @@ Il2Cpp.perform(() => {
     //  INPUT + NAVIGATION
     // ================================================================
     function processInput() {
-        // Both joysticks — pick the one with more deflection
         const yR = joyY(1), yL = joyY(0);
         const y = Math.abs(yR) > Math.abs(yL) ? yR : yL;
         const its = items();
@@ -246,12 +392,15 @@ Il2Cpp.perform(() => {
 
         if (press && O.cursor < its.length) {
             const it = its[O.cursor];
-            if (it.t === "tab")  { O.tab = it.to; O.cursor = 0; }
+            if (it.t === "tab")       { O.tab = it.to; O.cursor = 0; }
             else if (it.t === "back") { O.tab = "main"; O.cursor = 0; }
-            else if (it.t === "tog") {
+            else if (it.t === "tog")  {
                 O[it.k] = !O[it.k];
                 log(it.k + " = " + O[it.k]);
                 onToggle(it.k, O[it.k]);
+            }
+            else if (it.t === "act")  {
+                try { it.fn(); } catch(e) { flashAction("err: " + e.message); }
             }
         }
     }
@@ -335,50 +484,46 @@ Il2Cpp.perform(() => {
         if (grip(1)) ensurePlat(1); else killPlat(1);
     }
 
-    // ---- ORBIT ALL ----
+    // ---- ORBIT ALL — improved with ACCompanion params ----
     function tickOrbitAll() {
         if (!O.orbitAllOn) return;
-        O.orbitAngle += 0.03;
+        // ACCompanion: speed 2.0, interval ~0.05s → angle += speed * dt
+        // We run at ~60fps (dt ≈ 0.0167), so angle += 2.0 * 0.0167 ≈ 0.033
+        O.orbitAngle += 0.033;
+        if (O.orbitAngle > 6.2831853) O.orbitAngle -= 6.2831853;
         try {
             const myPos = readPos(headTf());
             if (!myPos) return;
-            const allPlayers = NetPlayerClass.method("get_spawnedPlayers").invoke();
-            if (!allPlayers || allPlayers.handle.isNull()) return;
-            const localP = NetPlayerClass.method("get_localPlayer").invoke();
-            const localHandle = localP ? localP.handle.toString() : "";
 
-            let count = 0;
-            try { count = allPlayers.method("get_Count").invoke(); } catch(_) { return; }
-            if (count <= 1) return;
+            const radius = 3.8;  // ACCompanion uses 3.8
 
-            let idx = 0;
-            const radius = 2.5;
-            for (let i = 0; i < count; i++) {
-                let np;
-                try { np = allPlayers.method("get_Item").invoke(i); } catch(_) { continue; }
-                if (!np || np.handle.isNull()) continue;
-                if (np.handle.toString() === localHandle) continue;
+            let others = [];
+            forEachOtherPlayer(np => { others.push(np); });
+            if (others.length === 0) return;
 
-                const angle = O.orbitAngle + idx * ((2 * Math.PI) / (count - 1));
+            const step = (2 * Math.PI) / others.length;
+            for (let idx = 0; idx < others.length; idx++) {
+                const np = others[idx];
+                const angle = O.orbitAngle + step * idx;
                 const ox = myPos.x + Math.cos(angle) * radius;
                 const oz = myPos.z + Math.sin(angle) * radius;
-                const oy = myPos.y;
+                const oy = myPos.y + 0.5;  // ACCompanion: Y + 0.5
 
-                // Move avatar root transform
+                // Move via transform (direct position set like ACCompanion)
                 try {
                     const root = np.field("avatarRoot").value;
                     if (root && !root.handle.isNull()) {
                         root.method("set_position").invoke([ox, oy, oz]);
                     }
-                } catch(_){}
-                // Also move head for visual
-                try {
-                    const hd = np.field("head").value;
-                    if (hd && !hd.handle.isNull()) {
-                        hd.method("set_position").invoke([ox, oy + 0.2, oz]);
-                    }
-                } catch(_){}
-                idx++;
+                } catch(_) {
+                    // Fallback: get_transform
+                    try {
+                        const tf = np.method("get_transform").invoke();
+                        if (tf && !tf.handle.isNull()) {
+                            tf.method("set_position").invoke([ox, oy, oz]);
+                        }
+                    } catch(_2) {}
+                }
             }
         } catch(e) {
             if (O.tick % 300 === 0) log("orbitAll err: " + e);
@@ -408,7 +553,6 @@ Il2Cpp.perform(() => {
 
             const head = headTf();
             if (!head) {
-                // Throttled log
                 if (O.tick - O.headWaitTick >= 300) {
                     O.headWaitTick = O.tick;
                     const pi = playerInst();
@@ -520,5 +664,5 @@ Il2Cpp.perform(() => {
         }
     }
 
-    log("===== Orbit Menu V5.0 READY =====");
+    log("===== Orbit Menu V6.0 READY =====");
 });
