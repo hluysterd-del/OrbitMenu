@@ -1,14 +1,14 @@
 // ====================================================================
-//  Orbit Menu V7.0 — Animal Company
-//  Features: RPC Shield, Kick Gun, Gun Beam Fix, Name Mods,
-//  Orbit Prefab, Undetected Mob Spawner, Soundboard
+//  Orbit Menu V7.1 — Animal Company
+//  Fixes: All guns (proper raycast + collider targeting), soundboard,
+//         snowball launcher, anti-modder, RPC bypass
 // ====================================================================
 
 console.log("[Orbit] Script loaded, waiting 5s for game...");
 setTimeout(() => {
 console.log("[Orbit] Timer fired, calling Il2Cpp.perform...");
 Il2Cpp.perform(() => {
-    console.log("[Orbit] ===== Orbit Menu V7.0 LOADING =====");
+    console.log("[Orbit] ===== Orbit Menu V7.1 LOADING =====");
 
     // ---- Assemblies ----
     let acImage, coreImage, physImage, uiModImage, uiImage, textImage;
@@ -23,11 +23,14 @@ Il2Cpp.perform(() => {
     let audioModImage = null;
     try { audioModImage = Il2Cpp.domain.assembly("UnityEngine.AudioModule").image; } catch(_){}
     let webReqMultiImage = null;
-    try { webReqMultiImage = Il2Cpp.domain.assembly("UnityEngine.UnityWebRequestMultimediaModule").image; } catch(_){}
-    let webReqAudioImage = null;
-    try { webReqAudioImage = Il2Cpp.domain.assembly("UnityEngine.UnityWebRequestAudioModule").image; } catch(_){}
+    try { webReqMultiImage = Il2Cpp.domain.assembly("UnityEngine.UnityWebRequestAudioModule").image; } catch(_){}
+    if (!webReqMultiImage) try { webReqMultiImage = Il2Cpp.domain.assembly("UnityEngine.UnityWebRequestMultimediaModule").image; } catch(_){}
+    if (!webReqMultiImage) try { webReqMultiImage = Il2Cpp.domain.assembly("UnityEngine.UnityWebRequestModule").image; } catch(_){}
     let mscorlibImage = null;
     try { mscorlibImage = Il2Cpp.domain.assembly("mscorlib").image; } catch(_){}
+    let photonVoiceImage = null;
+    try { photonVoiceImage = Il2Cpp.domain.assembly("PhotonVoice").image; } catch(_){}
+    if (!photonVoiceImage) try { photonVoiceImage = Il2Cpp.domain.assembly("PhotonVoice.API").image; } catch(_){}
 
     // ---- Core Classes ----
     const GameObjectClass = coreImage.class("UnityEngine.GameObject");
@@ -47,11 +50,15 @@ Il2Cpp.perform(() => {
     const ColliderClass   = physImage.class("UnityEngine.Collider");
     const RigidbodyClass  = physImage.class("UnityEngine.Rigidbody");
     const PhysicsClass    = physImage.class("UnityEngine.Physics");
+    let BoxColliderClass  = null;
+    try { BoxColliderClass = physImage.class("UnityEngine.BoxCollider"); } catch(_){}
     let LineRendererClass = null;
     try { LineRendererClass = coreImage.class("UnityEngine.LineRenderer"); } catch(_){}
     let AudioSourceClass = null;
     if (audioModImage) try { AudioSourceClass = audioModImage.class("UnityEngine.AudioSource"); } catch(_){}
     if (!AudioSourceClass) try { AudioSourceClass = coreImage.class("UnityEngine.AudioSource"); } catch(_){}
+    let ApplicationClass = null;
+    try { ApplicationClass = coreImage.class("UnityEngine.Application"); } catch(_){}
 
     // ---- AC Classes ----
     let PlayerControllerClass, GorillaLocomotionClass, XRInputManagerClass, NetPlayerClass;
@@ -66,6 +73,12 @@ Il2Cpp.perform(() => {
     try { NetSessionRPCsClass = acImage.class("AnimalCompany.NetSessionRPCs"); } catch(_){}
     let GBOClass = null;
     try { GBOClass = acImage.class("AnimalCompany.GameplayBaseObject"); } catch(_){}
+    let NetworkObjectClass = null;
+    if (fusionImage) try { NetworkObjectClass = fusionImage.class("Fusion.NetworkObject"); } catch(_){}
+
+    // ---- Photon Voice (for mic passthrough) ----
+    let RecorderClass = null;
+    if (photonVoiceImage) try { RecorderClass = photonVoiceImage.class("Photon.Voice.Unity.Recorder"); } catch(_){}
 
     // ---- IO Classes ----
     let DirectoryClass = null, PathClass = null;
@@ -126,12 +139,16 @@ Il2Cpp.perform(() => {
     };
     const NAME_PRESETS = [
         {l:"Orbit On Top", v:"<color=#bb88ff><size=40>Orbit Menu On Top</size></color>"},
-        {l:"Giant Emojis", v:"<size=300>😀😀😀😀😀😀</size>"},
+        {l:"Giant Emojis", v:"<size=300>\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}</size>"},
         {l:"Rainbow Text", v:"<color=red>O</color><color=orange>R</color><color=yellow>B</color><color=green>I</color><color=cyan>T</color><color=blue> </color><color=magenta>M</color><color=red>E</color><color=orange>N</color><color=yellow>U</color>"},
         {l:"Invisible Name", v:"<color=#00000000>.</color>"},
         {l:"Huge Purple", v:"<size=200><color=#bb88ff>ORBIT</color></size>"},
         {l:"Tiny Spam", v:"<size=5>orbitorbitorbitorbitorbitorbitorbitorbitorbitorbitorbitorbitorbit</size>"},
         {l:"Reset Name", v:"RESET"},
+    ];
+    const SNOWBALL_ITEMS = [
+        "item_snowball","item_egg","item_disc","item_grenade","item_flashbang",
+        "item_dynamite","item_broccoli_grenade","item_cluster_grenade",
     ];
 
     // ================================================================
@@ -139,7 +156,6 @@ Il2Cpp.perform(() => {
     // ================================================================
     globalThis.orbit = globalThis.orbit || {};
     const O = globalThis.orbit;
-    // Preserve hook across reloads
     const hadHook = O.hookInstalled;
     Object.assign(O, {
         tick: O.tick || 0, hookInstalled: hadHook || false,
@@ -149,15 +165,19 @@ Il2Cpp.perform(() => {
         // Features
         flyOn: O.flyOn||false, platformsOn: O.platformsOn||false, orbitAllOn: O.orbitAllOn||false,
         itemGunOn: O.itemGunOn||false, tpGunOn: O.tpGunOn||false, kickGunOn: O.kickGunOn||false,
+        snowballOn: O.snowballOn||false,
         invincibleOn: O.invincibleOn||false, invisibleOn: O.invisibleOn||false,
         noRedWatchOn: O.noRedWatchOn||false, longArmsOn: O.longArmsOn||false,
         shieldOn: O.shieldOn||false,
+        antiModderOn: O.antiModderOn||false,
         // Fly
         savedGravity: null,
         // Platforms
         platL: null, platR: null, platLLatched: false, platRLatched: false,
         // Gun (shared beam)
-        gunLine: null, gunPointer: null, gunCd: 0, gunTarget: null,
+        gunLine: null, gunPointer: null, gunCd: 0,
+        // Snowball
+        snowballIdx: O.snowballIdx||0, snowballCd: 0,
         // Orbit
         orbitAngle: 0,
         itemOrbitOn: O.itemOrbitOn||false, itemOrbitObjs: O.itemOrbitObjs||[], itemOrbitAngle: 0,
@@ -169,11 +189,14 @@ Il2Cpp.perform(() => {
         mobSpawnIdx: O.mobSpawnIdx||0, mobSpawnDelay: 0,
         // Soundboard
         soundsPath: null, soundFiles: [], soundIdx: 0,
-        soundSource: null, soundReq: null, soundPending: "",
+        soundSource: null, soundReq: null, soundReqKind: "", soundPending: "",
+        soundUseMic: false, photonRecorder: null,
         // Name
         savedName: null,
         // Self RPC bypass
         selfBypass: false,
+        // Anti-modder
+        playerPositions: O.playerPositions||{}, detectedModders: O.detectedModders||{},
         // Misc
         actionMsg: "", actionTick: 0,
         lastLog: 0, lastText: "", headWaitTick: 0,
@@ -189,8 +212,47 @@ Il2Cpp.perform(() => {
     function getTransform(obj) { return obj.method("get_transform").invoke(); }
     function getComponent(obj, cls) { return obj.method("GetComponent",1).inflate(cls).invoke(); }
     function addComponent(obj, cls) { return obj.method("AddComponent",1).inflate(cls).invoke(); }
+    function getComponentInParent(obj, cls) {
+        try { return obj.method("GetComponentInParent",0).inflate(cls).invoke(); } catch(_){}
+        return null;
+    }
     function destroySafe(obj) { if(obj) try{ObjectClass.method("Destroy",1).invoke(obj);}catch(_){} }
     function Destroy(obj) { destroySafe(obj); }
+    function playerIsLocal(np) {
+        try { return np.method("get_IsMine").invoke(); } catch(_){}
+        return false;
+    }
+    function getGameObjectSafe(obj) {
+        try { const go = obj.method("get_gameObject").invoke(); if (go && !go.handle.isNull()) return go; } catch(_){}
+        return null;
+    }
+
+    // ---- Network Authority (RPC Bypass) ----
+    function getNetworkObjectSafe(target) {
+        if (!target || target.handle.isNull()) return null;
+        try { if (target.class && target.class.name === "NetworkObject") return target; } catch(_){}
+        const getters = [
+            () => target.method("get_Object").invoke(),
+            () => target.method("get_NetworkObject").invoke(),
+            () => target.method("get_networkObject").invoke(),
+        ];
+        if (NetworkObjectClass) {
+            getters.push(() => target.method("GetComponent",1).inflate(NetworkObjectClass).invoke());
+        }
+        for (const getter of getters) {
+            try { const obj = getter(); if (obj && !obj.handle.isNull()) return obj; } catch(_){}
+        }
+        return null;
+    }
+    function requestStateAuthoritySafe(target) {
+        if (!target || target.handle.isNull()) return;
+        try {
+            const netObj = getNetworkObjectSafe(target);
+            if (netObj && !netObj.handle.isNull()) {
+                netObj.method("RequestStateAuthority").invoke();
+            }
+        } catch(_){}
+    }
 
     function playerInst() {
         try { const v=PlayerControllerClass.method("get_instance").invoke(); if(v&&!v.handle.isNull()) return v; } catch(_){} return null;
@@ -353,8 +415,13 @@ Il2Cpp.perform(() => {
             let hooked = 0;
             hostileRPCs.forEach(rpcName => {
                 try {
-                    const m = NetPlayerClass.method(rpcName);
-                    if (m) {
+                    const methods = [];
+                    try { methods.push(...NetPlayerClass.method(rpcName).overloads()); } catch(_){
+                        try { methods.push(NetPlayerClass.method(rpcName)); } catch(_2){}
+                    }
+                    methods.forEach(m => {
+                        if (!m) return;
+                        const orig = m;
                         m.implementation = function (...args) {
                             try {
                                 if (this.method("get_IsMine").invoke() && !O.selfBypass) {
@@ -362,26 +429,12 @@ Il2Cpp.perform(() => {
                                     return;
                                 }
                             } catch(_){}
-                            return m.invoke(...args);
+                            return orig.invoke(...args);
                         };
                         hooked++;
-                    }
+                    });
                 } catch(_){}
             });
-            // Hook all overloads of RPC_PlayerHit
-            try {
-                NetPlayerClass.method("RPC_PlayerHit").overloads().forEach(overload => {
-                    overload.implementation = function (...args) {
-                        try {
-                            if (this.method("get_IsMine").invoke() && !O.selfBypass) {
-                                log("[SHIELD] Blocked: RPC_PlayerHit overload");
-                                return;
-                            }
-                        } catch(_){}
-                        return overload.invoke(...args);
-                    };
-                });
-            } catch(_){}
             O.shieldInstalled = true;
             log("[SHIELD] Installed — blocked " + hooked + " hostile RPCs");
             flash("SHIELD ON — " + hooked + " RPCs blocked");
@@ -389,13 +442,15 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  KICK PLAYER
+    //  KICK PLAYER (with RPC bypass)
     // ================================================================
     function kickPlayer(player) {
         if (!NetSessionRPCsClass) { flash("no NetSessionRPCs"); return; }
         try {
             const netInst = NetSessionRPCsClass.field("_instance").value;
             if (!netInst || netInst.handle.isNull()) { flash("no session inst"); return; }
+            // Request authority to bypass target's anti-RPC
+            requestStateAuthoritySafe(player);
             const playerRef = player.method("get_Object").invoke().method("get_InputAuthority").invoke();
             O.selfBypass = true;
             try { netInst.method("RPC_KickPlayer").invoke(playerRef); } catch(_){}
@@ -409,17 +464,28 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  OP ACTIONS
+    //  OP ACTIONS (all with RPC bypass)
     // ================================================================
     function withBypass(fn) { O.selfBypass=true; try{fn();}finally{O.selfBypass=false;} }
-    function actTpAll() { const p=readPos(headTf()); if(!p){flash("no head");return;} let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{try{np.method("RPC_Teleport").invoke([p.x,p.y,p.z]);}catch(_){try{np.method("RPC_Teleport",1).invoke([p.x,p.y,p.z]);}catch(_2){}}});}); flash("TP'd "+n); }
-    function actYeetAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{try{np.method("RPC_AddForce",1).invoke([0,80,0]);}catch(_){try{np.method("RPC_AddForce").invoke([0,80,0]);}catch(_2){}}});}); flash("Yeeted "+n); }
-    function actStinkAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{try{np.method("RPC_TagAsStinky",0).invoke();}catch(_){try{np.method("RPC_TagAsStinky").invoke();}catch(_2){}}});}); flash("Stinked "+n); }
-    function actColorAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{const h=Math.random()*360;try{np.method("RPC_SetColorHSV",4).invoke(h,1,1,1);}catch(_){try{np.method("RPC_SetColorHSV").invoke(h,1,1,1);}catch(_2){}}});}); flash("Colored "+n); }
-    function actFlingAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{try{np.method("RPC_AddForce",1).invoke([0,120,0]);}catch(_){}})}); flash("Flung "+n); }
-    function actVoidAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{try{np.method("RPC_Teleport",1).invoke([0,-500,0]);}catch(_){try{np.method("RPC_Teleport").invoke([0,-500,0]);}catch(_2){}}});}); flash("Voided "+n); }
-    function actMoneyAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{try{np.method("RPC_AddPlayerMoney",1).invoke(99999);}catch(_){}})}); flash("$99999 to "+n); }
-    function actStunAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{try{np.method("RPC_Stun",1).invoke(30.0);}catch(_){}})}); flash("Stunned "+n); }
+
+    function actOnPlayer(np, rpcName, args) {
+        requestStateAuthoritySafe(np);
+        const overloads = [1, 0, 2, 3, 4];
+        for (const pc of overloads) {
+            try { np.method(rpcName, pc).invoke(...args); return true; } catch(_){}
+        }
+        try { np.method(rpcName).invoke(...args); return true; } catch(_){}
+        return false;
+    }
+
+    function actTpAll() { const p=readPos(headTf()); if(!p){flash("no head");return;} let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);actOnPlayer(np,"RPC_Teleport",[[p.x,p.y,p.z]]);});}); flash("TP'd "+n); }
+    function actYeetAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);actOnPlayer(np,"RPC_AddForce",[[0,80,0]]);});}); flash("Yeeted "+n); }
+    function actStinkAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);try{np.method("RPC_TagAsStinky",0).invoke();}catch(_){try{np.method("RPC_TagAsStinky").invoke();}catch(_2){}}});}); flash("Stinked "+n); }
+    function actColorAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);const h=Math.random()*360;try{np.method("RPC_SetColorHSV",4).invoke(h,1,1,1);}catch(_){try{np.method("RPC_SetColorHSV").invoke(h,1,1,1);}catch(_2){}}});}); flash("Colored "+n); }
+    function actFlingAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);actOnPlayer(np,"RPC_AddForce",[[0,120,0]]);});}); flash("Flung "+n); }
+    function actVoidAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);actOnPlayer(np,"RPC_Teleport",[[0,-500,0]]);});}); flash("Voided "+n); }
+    function actMoneyAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);try{np.method("RPC_AddPlayerMoney",1).invoke(99999);}catch(_){}})}); flash("$99999 to "+n); }
+    function actStunAll() { let n=0; withBypass(()=>{n=forEachOtherPlayer(np=>{requestStateAuthoritySafe(np);try{np.method("RPC_Stun",1).invoke(30.0);}catch(_){}})}); flash("Stunned "+n); }
     function actKickAll() { withBypass(()=>{let n=forEachOtherPlayer(np=>{kickPlayer(np);}); flash("Kicked "+n);}); }
 
     function toggleInvincible(on) {
@@ -480,36 +546,59 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  GUN BEAM — proper raycast from right hand
+    //  GUN BEAM — proper raycast from right hand with collider detection
     // ================================================================
     function renderGun() {
         const rH = handTf(1); if (!rH) return null;
         const startPos = rH.method("get_position").invoke();
         const direction = rH.method("get_forward").invoke();
+        const gunMaxDistance = 384.0;
+        const layerMask = -2063;
+
+        // Offset ray start slightly forward
+        let rayStart;
+        try {
+            rayStart = Vector3Class.method("op_Addition",2).invoke(startPos,
+                Vector3Class.method("op_Multiply",2).invoke(direction, 0.03));
+        } catch(_) { rayStart = startPos; }
 
         // Raycast to find where beam hits
-        let endPos, hitPoint = null;
+        let bestRay = null, bestDist = Infinity;
         try {
-            const dirDiv = Vector3Class.method("op_Division").invoke(direction, 4);
-            const rayStart = Vector3Class.method("op_Addition").invoke(startPos, dirDiv);
-            const hits = PhysicsClass.method("RaycastAll",4).invoke(rayStart, direction, 512.0, -3180559);
-            let bestDist = Infinity;
-            for (const hit of hits) {
-                try {
-                    const point = hit.method("get_point").invoke();
-                    const dist = Vector3Class.method("Distance").invoke(point, startPos);
-                    if (dist < bestDist) { bestDist = dist; hitPoint = point; }
-                } catch(_){}
+            const hits = PhysicsClass.method("RaycastAll",4).invoke(rayStart, direction, gunMaxDistance, layerMask);
+            if (hits && hits.length) {
+                for (let i = 0; i < hits.length; i++) {
+                    const hit = hits.get(i);
+                    try {
+                        // Skip local player colliders
+                        const hitCollider = hit.method("get_collider").invoke();
+                        if (hitCollider && !hitCollider.handle.isNull()) {
+                            try {
+                                const hitPlayer = getComponentInParent(hitCollider, NetPlayerClass);
+                                if (hitPlayer && !hitPlayer.handle.isNull() && playerIsLocal(hitPlayer)) continue;
+                            } catch(_){}
+                        }
+                        const point = hit.method("get_point").invoke();
+                        const dist = Vector3Class.method("Distance",2).invoke(point, startPos);
+                        if (dist < bestDist) { bestDist = dist; bestRay = hit; }
+                    } catch(_){}
+                }
+            }
+        } catch(e) { if(O.tick%300===0) log("raycast: "+e); }
+
+        let endPos;
+        if (bestRay) {
+            endPos = bestRay.method("get_point").invoke();
+        } else {
+            try { endPos = Vector3Class.method("op_Addition",2).invoke(startPos, Vector3Class.method("op_Multiply",2).invoke(direction, gunMaxDistance)); } catch(_){ return null; }
+        }
+
+        // Check zero vector
+        try {
+            if (Vector3Class.method("op_Equality",2).invoke(endPos, [0,0,0])) {
+                endPos = Vector3Class.method("op_Addition",2).invoke(startPos, Vector3Class.method("op_Multiply",2).invoke(direction, gunMaxDistance));
             }
         } catch(_){}
-
-        if (hitPoint) {
-            endPos = hitPoint;
-        } else {
-            // No hit — extend 512 units
-            try { endPos = Vector3Class.method("op_Addition").invoke(startPos, Vector3Class.method("op_Multiply").invoke(direction, 512)); } catch(_){}
-        }
-        if (!endPos) return null;
 
         // Create/update pointer sphere
         if (!O.gunPointer || O.gunPointer.handle.isNull()) {
@@ -517,7 +606,7 @@ Il2Cpp.perform(() => {
                 O.gunPointer = GameObjectClass.method("CreatePrimitive").invoke(0);
                 O.gunPointer.method("set_name").invoke(Il2Cpp.string("[OGunPtr]"));
                 getTransform(O.gunPointer).method("set_localScale").invoke([0.1,0.1,0.1]);
-                try{getComponent(O.gunPointer,ColliderClass).method("set_enabled").invoke(false);}catch(_){}
+                try{const c=getComponent(O.gunPointer,ColliderClass);if(c)Destroy(c);}catch(_){}
                 ObjectClass.method("DontDestroyOnLoad").invoke(O.gunPointer);
             } catch(e){log("gunPtr: "+e);}
         }
@@ -538,7 +627,7 @@ Il2Cpp.perform(() => {
                     const lo = GameObjectClass.method("CreatePrimitive").invoke(0);
                     lo.method("set_name").invoke(Il2Cpp.string("[OGunLine]"));
                     try{getComponent(lo,RendererClass).method("set_enabled").invoke(false);}catch(_){}
-                    try{getComponent(lo,ColliderClass).method("set_enabled").invoke(false);}catch(_){}
+                    try{const c=getComponent(lo,ColliderClass);if(c)Destroy(c);}catch(_){}
                     O.gunLine = addComponent(lo, LineRendererClass);
                     ObjectClass.method("DontDestroyOnLoad").invoke(lo);
                 } catch(e){log("gunLine: "+e);}
@@ -554,80 +643,234 @@ Il2Cpp.perform(() => {
                 O.gunLine.method("set_endColor").invoke(gunColor);
                 O.gunLine.method("set_startWidth").invoke(0.025);
                 O.gunLine.method("set_endWidth").invoke(0.025);
-                O.gunLine.method("set_positionCount").invoke(2);
                 O.gunLine.method("set_useWorldSpace").invoke(true);
-                O.gunLine.method("SetPosition").invoke(0, startPos);
-                O.gunLine.method("SetPosition").invoke(1, endPos);
+
+                // Electric effect when trigger held
+                if (trigger(1)) {
+                    const Step = 10;
+                    O.gunLine.method("set_positionCount").invoke(Step);
+                    O.gunLine.method("SetPosition").invoke(0, startPos);
+                    for (let s = 1; s < Step - 1; s++) {
+                        const t = s / (Step - 1);
+                        const pos = Vector3Class.method("Lerp",3).invoke(startPos, endPos, t);
+                        if (Math.random() > 0.75) {
+                            const offset = [(Math.random()*0.2)-0.1,(Math.random()*0.2)-0.1,(Math.random()*0.2)-0.1];
+                            const jittered = Vector3Class.method("op_Addition",2).invoke(pos, offset);
+                            O.gunLine.method("SetPosition").invoke(s, jittered);
+                        } else {
+                            O.gunLine.method("SetPosition").invoke(s, pos);
+                        }
+                    }
+                    O.gunLine.method("SetPosition").invoke(Step - 1, endPos);
+                } else {
+                    O.gunLine.method("set_positionCount").invoke(2);
+                    O.gunLine.method("SetPosition").invoke(0, startPos);
+                    O.gunLine.method("SetPosition").invoke(1, endPos);
+                }
             } catch(_){}
         }
-        return { endPos, hitPoint };
+        return { ray: bestRay, endPos };
     }
+
     function hideGun() {
         if(O.gunPointer)try{O.gunPointer.method("SetActive").invoke(false);}catch(_){}
         if(O.gunLine)try{O.gunLine.method("get_gameObject").invoke().method("SetActive").invoke(false);}catch(_){}
     }
-    function findNearestPlayer(pos) {
-        let best=null, bestD=Infinity;
-        const others=getOtherPlayers();
-        for(const np of others){
-            try{const t=getTransform(np);const p=readPos(t);if(!p)continue;
-                const d=Math.sqrt((p.x-pos.x)**2+(p.y-pos.y)**2+(p.z-pos.z)**2);
-                if(d<bestD){bestD=d;best=np;}
-            }catch(_){
-                try{const view=np.method("get_view").invoke();if(!view)continue;
-                    const t=getTransform(view);const p=readPos(t);if(!p)continue;
-                    const d=Math.sqrt((p.x-pos.x)**2+(p.y-pos.y)**2+(p.z-pos.z)**2);
-                    if(d<bestD){bestD=d;best=np;}
-                }catch(_2){}
+
+    // ---- Get target player from raycast hit (proper collider-based detection) ----
+    function getGunTargetPlayer(ray) {
+        if (!ray) return null;
+        // Method 1: GetComponentInParent from the hit collider
+        try {
+            const collider = ray.method("get_collider").invoke();
+            if (collider && !collider.handle.isNull()) {
+                const target = getComponentInParent(collider, NetPlayerClass);
+                if (target && !target.handle.isNull() && !playerIsLocal(target)) return target;
+                // Try from the collider's gameObject
+                const go = getGameObjectSafe(collider);
+                if (go) {
+                    const target2 = getComponentInParent(go, NetPlayerClass);
+                    if (target2 && !target2.handle.isNull() && !playerIsLocal(target2)) return target2;
+                }
             }
-        }
-        return bestD < 5 ? best : null;
+        } catch(_){}
+
+        // Method 2: Nearest player to hit point (fallback)
+        try {
+            const hitPoint = ray.method("get_point").invoke();
+            const allPlayers = ObjectClass.method("FindObjectsByType",1).inflate(NetPlayerClass).invoke(0);
+            let closest = null, closestDist = 1.75;
+            for (let i = 0; i < allPlayers.length; i++) {
+                const p = allPlayers.get(i);
+                if (!p || p.handle.isNull()) continue;
+                if (playerIsLocal(p)) continue;
+                try {
+                    const go = getGameObjectSafe(p);
+                    if (!go) continue;
+                    const pos = getTransform(go).method("get_position").invoke();
+                    const d = Vector3Class.method("Distance",2).invoke(hitPoint, pos);
+                    if (d < closestDist) { closestDist = d; closest = p; }
+                } catch(_){}
+            }
+            return closest;
+        } catch(_){}
+        return null;
     }
 
     // ---- Item Gun ----
     function tickItemGun() {
-        if(!O.itemGunOn){return;}
+        if(!O.itemGunOn) return;
         if(!grip(1)){hideGun();return;}
-        const g=renderGun(); if(!g)return;
+        const g=renderGun(); if(!g) return;
         if(O.gunCd>0){O.gunCd--;return;}
-        if(!trigger(1))return;O.gunCd=25;
-        const ep=g.endPos;const epa=readPos(getTransform(O.gunPointer));
-        const id=ALL_ITEMS[Math.floor(Math.random()*ALL_ITEMS.length)];
-        const pos=epa||[0,0,0];
-        const pArr=[pos.x||pos[0]||0,pos.y||pos[1]||0,pos.z||pos[2]||0];
-        spawnItem(id,pArr,[0,0,0,1]);
-        flash("Shot: "+id.replace("item_",""));
+        if(!trigger(1)) return;
+        O.gunCd=25;
+        // Spawn at hit point
+        try {
+            const hitPoint = g.ray ? g.ray.method("get_point").invoke() : g.endPos;
+            const id=ALL_ITEMS[Math.floor(Math.random()*ALL_ITEMS.length)];
+            spawnItem(id, hitPoint, [0,0,0,1]);
+            flash("Shot: "+id.replace("item_",""));
+        } catch(e) { log("itemGun: "+e); }
     }
 
     // ---- TP Gun ----
     function tickTPGun() {
-        if(!O.tpGunOn){return;}
+        if(!O.tpGunOn) return;
         if(!grip(1)){hideGun();return;}
-        const g=renderGun(); if(!g)return;
+        const g=renderGun(); if(!g) return;
         if(!trigger(1)||O.gunCd>0){if(!trigger(1))O.gunCd=0;else O.gunCd--;return;}
         O.gunCd=20;
-        const ep=g.endPos;const epa=readPos(getTransform(O.gunPointer));
-        const pos=epa||ep;
-        const pArr=[pos.x||pos[0]||0,(pos.y||pos[1]||0)+1,pos.z||pos[2]||0];
-        try{const gl=gorillaInst();getTransform(gl).method("set_position").invoke(pArr);
-            const rb=getComponent(gl,RigidbodyClass);try{rb.method("set_linearVelocity").invoke([0,0,0]);}catch(_){try{rb.method("set_velocity").invoke([0,0,0]);}catch(_2){}}
-        }catch(_){}
+        try {
+            const hitPoint = g.ray ? g.ray.method("get_point").invoke() : g.endPos;
+            const pos = readPos(getTransform(O.gunPointer));
+            const tp = pos || {x:0,y:0,z:0};
+            const gl=gorillaInst();
+            getTransform(gl).method("set_position").invoke([tp.x, tp.y+1, tp.z]);
+            const rb=getComponent(gl,RigidbodyClass);
+            try{rb.method("set_linearVelocity").invoke([0,0,0]);}catch(_){try{rb.method("set_velocity").invoke([0,0,0]);}catch(_2){}}
+        } catch(_){}
         flash("TP'd to beam");
     }
 
     // ---- Kick Gun ----
     function tickKickGun() {
-        if(!O.kickGunOn){return;}
+        if(!O.kickGunOn) return;
         if(!grip(1)){hideGun();return;}
-        const g=renderGun(); if(!g)return;
+        const g=renderGun(); if(!g) return;
         if(!trigger(1)||O.gunCd>0){if(!trigger(1))O.gunCd=0;else O.gunCd--;return;}
         O.gunCd=30;
-        const ep=g.endPos;const epa=readPos(getTransform(O.gunPointer));
-        const pos=epa||ep;
-        const pPos={x:pos.x||pos[0]||0,y:pos.y||pos[1]||0,z:pos.z||pos[2]||0};
-        const target=findNearestPlayer(pPos);
-        if(target){withBypass(()=>{kickPlayer(target);});flash("KICKED target");}
-        else flash("No player near beam");
+        // Get target from ray collider (proper detection)
+        const target = getGunTargetPlayer(g.ray);
+        if(target){
+            withBypass(()=>{
+                requestStateAuthoritySafe(target);
+                kickPlayer(target);
+            });
+            flash("KICKED target");
+        } else {
+            flash("No player at beam");
+        }
+    }
+
+    // ================================================================
+    //  SNOWBALL LAUNCHER — fires items from hand with velocity
+    // ================================================================
+    function fireSnowball() {
+        const rH = handTf(1); if (!rH) return;
+        const pos = rH.method("get_position").invoke();
+        const fwd = rH.method("get_forward").invoke();
+        const itemID = SNOWBALL_ITEMS[O.snowballIdx];
+        try {
+            const result = PrefabGenClass.method("SpawnItem",4).invoke(
+                Il2Cpp.string("item_prefab/" + itemID), pos, [0,0,0,1], ptr(0)
+            );
+            if (!result || result.handle.isNull()) { flash("Spawn failed"); return; }
+            requestStateAuthoritySafe(result);
+            // Apply forward velocity
+            if (GBOClass) {
+                try {
+                    const gbo = getComponent(result, GBOClass);
+                    if (gbo && !gbo.handle.isNull()) {
+                        try { gbo.method("set_scaleModifier").invoke(127); } catch(_){}
+                        const velocity = Vector3Class.method("op_Multiply",2).invoke(fwd, 100);
+                        gbo.method("AddExternalForceVelocity",1).invoke(velocity);
+                    }
+                } catch(e){ log("snowball gbo: "+e); }
+            }
+            flash("Fired: " + itemID.replace("item_",""));
+        } catch(e) { log("snowball: "+e); flash("snowball failed"); }
+    }
+    function tickSnowball() {
+        if(!O.snowballOn) return;
+        if(!grip(1)) return;
+        if(O.snowballCd>0){O.snowballCd--;return;}
+        if(!trigger(1)) return;
+        O.snowballCd = 15;
+        fireSnowball();
+    }
+
+    // ================================================================
+    //  ANTI-MODDER — detect and abyss teleport other modders
+    // ================================================================
+    function tickAntiModder() {
+        if (!O.antiModderOn) return;
+        if (O.tick % 90 !== 0) return; // Check every ~1.5 seconds
+
+        const others = getOtherPlayers();
+        const newPositions = {};
+
+        for (const np of others) {
+            const h = np.handle.toString();
+            try {
+                const go = getGameObjectSafe(np);
+                if (!go) continue;
+                const pos = readPos(getTransform(go));
+                if (!pos) continue;
+
+                newPositions[h] = { x: pos.x, y: pos.y, z: pos.z, tick: O.tick };
+
+                const prev = O.playerPositions[h];
+                if (prev) {
+                    const dx = pos.x - prev.x, dy = pos.y - prev.y, dz = pos.z - prev.z;
+                    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                    const tickDiff = O.tick - prev.tick;
+                    const speed = dist / Math.max(1, tickDiff);
+
+                    // Teleporting = >2 units/tick AND >50 total distance (rules out normal movement)
+                    if (speed > 2 && dist > 50 && !O.detectedModders[h]) {
+                        O.detectedModders[h] = true;
+                        log("[ANTI-MOD] Modder detected! Speed=" + speed.toFixed(1) + " dist=" + dist.toFixed(0));
+
+                        // Random abyss coordinates
+                        const abyssX = 111000 + Math.floor(Math.random() * 999);
+                        const abyssY = 111000 + Math.floor(Math.random() * 999);
+                        const abyssZ = 111000 + Math.floor(Math.random() * 999);
+
+                        withBypass(() => {
+                            requestStateAuthoritySafe(np);
+                            actOnPlayer(np, "RPC_Teleport", [[abyssX, abyssY, abyssZ]]);
+                        });
+                        flash("Modder sent to abyss!");
+                    }
+                }
+            } catch(_){}
+        }
+        O.playerPositions = newPositions;
+
+        // Re-abyss already detected modders every check
+        for (const np of others) {
+            const h = np.handle.toString();
+            if (O.detectedModders[h]) {
+                const abyssX = 111000 + Math.floor(Math.random() * 999);
+                const abyssY = 111000 + Math.floor(Math.random() * 999);
+                const abyssZ = 111000 + Math.floor(Math.random() * 999);
+                withBypass(() => {
+                    requestStateAuthoritySafe(np);
+                    actOnPlayer(np, "RPC_Teleport", [[abyssX, abyssY, abyssZ]]);
+                });
+            }
+        }
     }
 
     // ================================================================
@@ -638,7 +881,10 @@ Il2Cpp.perform(() => {
         const mp=readPos(headTf());if(!mp)return;const ot=getOtherPlayers();if(!ot.length)return;
         const r=4,st=(2*Math.PI)/ot.length;
         withBypass(()=>{
-            for(let i=0;i<ot.length;i++){const a=O.orbitAngle+st*i;try{ot[i].method("RPC_Teleport").invoke([mp.x+Math.cos(a)*r,mp.y+0.5,mp.z+Math.sin(a)*r]);}catch(_){try{ot[i].method("RPC_Teleport",1).invoke([mp.x+Math.cos(a)*r,mp.y+0.5,mp.z+Math.sin(a)*r]);}catch(_2){}}}
+            for(let i=0;i<ot.length;i++){const a=O.orbitAngle+st*i;
+                requestStateAuthoritySafe(ot[i]);
+                actOnPlayer(ot[i],"RPC_Teleport",[[mp.x+Math.cos(a)*r,mp.y+0.5,mp.z+Math.sin(a)*r]]);
+            }
         });
     }
     function startItemOrbit() {
@@ -654,13 +900,11 @@ Il2Cpp.perform(() => {
         O.itemOrbitObjs=alive;if(!alive.length)O.itemOrbitOn=false;
     }
 
-    // Prefab Orbit — spawn selected prefab on a timer, orbit around you
+    // Prefab Orbit
     function tickPrefabOrbit() {
         if(!O.prefabOrbitOn) return;
         O.prefabOrbitAngle+=0.03;if(O.prefabOrbitAngle>6.28)O.prefabOrbitAngle-=6.28;
         const mp=readPos(headTf());if(!mp)return;
-
-        // Spawn new prefab on timer
         O.prefabOrbitCd--;
         if(O.prefabOrbitCd<=0 && O.prefabOrbitObjs.length<8){
             O.prefabOrbitCd = O.prefabOrbitRate;
@@ -669,8 +913,6 @@ Il2Cpp.perform(() => {
             const obj = spawnNetworkPrefab(name,[mp.x+Math.cos(a)*3,mp.y+0.5,mp.z+Math.sin(a)*3],[0,0,0,1]);
             if(obj&&!obj.handle.isNull()){try{ObjectClass.method("DontDestroyOnLoad").invoke(obj);}catch(_){}O.prefabOrbitObjs.push(obj);}
         }
-
-        // Move existing
         const r=3,st=(2*Math.PI)/Math.max(1,O.prefabOrbitObjs.length),alive=[];
         for(let i=0;i<O.prefabOrbitObjs.length;i++){
             const o=O.prefabOrbitObjs[i];
@@ -688,8 +930,7 @@ Il2Cpp.perform(() => {
     //  MOB SPAWNER (undetected — delayed spawn)
     // ================================================================
     function spawnMobDelayed(mobID) {
-        // Queue mob spawn with random 1-3 second delay
-        const delay = 60 + Math.floor(Math.random()*120); // 1-3 sec at 60fps
+        const delay = 60 + Math.floor(Math.random()*120);
         O.mobSpawnDelay = delay;
         O.mobSpawnQueued = mobID;
         flash("Mob queued: " + mobID + " (" + Math.round(delay/60) + "s)");
@@ -702,7 +943,6 @@ Il2Cpp.perform(() => {
             O.mobSpawnQueued = null;
             const p=readPos(headTf()),fwd=readFwd(headTf());
             if(p&&fwd){
-                // Spawn 8-15 units away in random direction for stealth
                 const dist = 8 + Math.random()*7;
                 const angle = Math.random()*Math.PI*2;
                 const sp = [p.x+Math.cos(angle)*dist, p.y, p.z+Math.sin(angle)*dist];
@@ -733,32 +973,53 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  SOUNDBOARD
+    //  SOUNDBOARD (fixed — proper path + URL encoding + mic passthrough)
     // ================================================================
     function ensureSoundsPath() {
         if (O.soundsPath) return O.soundsPath;
-        if (!DirectoryClass) return null;
+        if (!DirectoryClass) { log("[SOUNDS] No Directory class"); return null; }
+
+        const candidates = [];
+
+        // 1. Application.persistentDataPath (most reliable in Unity)
+        if (ApplicationClass) {
+            try {
+                const pData = ApplicationClass.method("get_persistentDataPath").invoke();
+                if (pData && !pData.handle.isNull()) {
+                    let base = pData.toString().replace(/\\/g, "/");
+                    if (!base.endsWith("/")) base += "/";
+                    candidates.push(base + "Sounds/");
+                    log("[SOUNDS] persistentDataPath: " + base);
+                }
+            } catch(_){}
+        }
+
+        // 2. Script location
         try {
-            // Try next to script location, then common paths
-            const candidates = [];
-            try { if(typeof __filename!=="undefined"&&__filename){const ls=Math.max(__filename.lastIndexOf('/'),__filename.lastIndexOf('\\'));if(ls!==-1)candidates.push(__filename.substring(0,ls+1));} }catch(_){}
-            candidates.push("C:/OrbitMenu/Sounds/");
-            candidates.push("./Sounds/");
-            for (const base of candidates) {
-                const path = base + (base.endsWith("Sounds/")||base.endsWith("Sounds\\") ? "" : "Sounds/");
-                try {
-                    const pathStr = Il2Cpp.string(path);
-                    if (!DirectoryClass.method("Exists").invoke(pathStr)) {
-                        DirectoryClass.method("CreateDirectory").invoke(pathStr);
-                        log("[SOUNDS] Created: " + path);
-                    }
-                    O.soundsPath = path;
-                    return path;
-                } catch(_){}
+            if (typeof __filename !== "undefined" && __filename) {
+                const ls = Math.max(__filename.lastIndexOf('/'), __filename.lastIndexOf('\\'));
+                if (ls !== -1) candidates.push(__filename.substring(0, ls + 1) + "Sounds/");
             }
         } catch(_){}
+
+        // 3. Fallback
+        candidates.push("C:/OrbitMenu/Sounds/");
+
+        for (const path of candidates) {
+            try {
+                const pathStr = Il2Cpp.string(path);
+                if (!DirectoryClass.method("Exists").invoke(pathStr)) {
+                    DirectoryClass.method("CreateDirectory").invoke(pathStr);
+                    log("[SOUNDS] Created: " + path);
+                }
+                O.soundsPath = path;
+                log("[SOUNDS] Using: " + path);
+                return path;
+            } catch(e) { log("[SOUNDS] Path failed: " + path + " — " + e); }
+        }
         return null;
     }
+
     function refreshSoundList() {
         const path = ensureSoundsPath();
         if (!path) { flash("No Sounds folder"); return; }
@@ -767,87 +1028,214 @@ Il2Cpp.perform(() => {
             if (!DirectoryClass.method("Exists").invoke(pathStr)) {
                 DirectoryClass.method("CreateDirectory").invoke(pathStr);
             }
-            const rawFiles = DirectoryClass.method("GetFiles",1).invoke(pathStr);
+            // Try GetFiles with 1 arg first
+            let rawFiles = null;
+            try { rawFiles = DirectoryClass.method("GetFiles",1).invoke(pathStr); } catch(_){}
+            // Fallback: GetFiles with 2 args for each pattern
             const next = [];
-            if (rawFiles && !rawFiles.handle.isNull()) {
+            if (rawFiles && !rawFiles.handle.isNull() && rawFiles.length > 0) {
                 for (let i=0;i<rawFiles.length;i++) {
-                    const fp = rawFiles.get(i).toString();
-                    const low = fp.toLowerCase();
-                    if (!low.endsWith(".wav")&&!low.endsWith(".ogg")&&!low.endsWith(".mp3")) continue;
-                    const si = Math.max(fp.lastIndexOf('/'),fp.lastIndexOf('\\'));
-                    next.push(fp.substring(si+1));
+                    try {
+                        const fp = rawFiles.get(i).toString();
+                        const low = fp.toLowerCase();
+                        if (!low.endsWith(".wav")&&!low.endsWith(".ogg")&&!low.endsWith(".mp3")) continue;
+                        const si = Math.max(fp.lastIndexOf('/'),fp.lastIndexOf('\\'));
+                        next.push(fp.substring(si+1));
+                    } catch(_){}
+                }
+            }
+            if (next.length === 0) {
+                // Try pattern-based search
+                const patterns = ["*.mp3","*.ogg","*.wav"];
+                for (const pat of patterns) {
+                    try {
+                        const files = DirectoryClass.method("GetFiles",2).invoke(pathStr, Il2Cpp.string(pat));
+                        if (files && !files.handle.isNull()) {
+                            for (let i=0;i<files.length;i++) {
+                                try {
+                                    const fp = files.get(i).toString();
+                                    const si = Math.max(fp.lastIndexOf('/'),fp.lastIndexOf('\\'));
+                                    next.push(fp.substring(si+1));
+                                } catch(_){}
+                            }
+                        }
+                    } catch(_){}
                 }
             }
             next.sort();
             O.soundFiles = next;
             O.soundIdx = 0;
             flash(next.length ? next.length + " sounds loaded" : "No sounds in " + path);
-        } catch(e) { log("[SOUNDS] err: "+e); }
+            log("[SOUNDS] Found " + next.length + " files in " + path);
+        } catch(e) { log("[SOUNDS] Refresh err: "+e); }
     }
+
     function prepareSoundboard() {
-        try { if(O.soundSource&&!O.soundSource.isNull()) return true; } catch(_){}
-        if (!AudioSourceClass) return false;
+        try { if(O.soundSource && !O.soundSource.handle.isNull()) return true; } catch(_){}
+        if (!AudioSourceClass) { log("[SOUND] No AudioSource class"); return false; }
         try {
             const gl = gorillaInst();
             if (!gl) return false;
             const go = gl.method("get_gameObject").invoke();
             let src = null;
             try { src = getComponent(go, AudioSourceClass); } catch(_){}
-            if (!src || src.isNull()) src = addComponent(go, AudioSourceClass);
-            if (!src || src.isNull()) return false;
+            if (!src || src.handle.isNull()) src = addComponent(go, AudioSourceClass);
+            if (!src || src.handle.isNull()) return false;
             O.soundSource = src;
             try{src.method("set_playOnAwake").invoke(false);}catch(_){}
             try{src.method("set_loop").invoke(false);}catch(_){}
             try{src.method("set_spatialBlend").invoke(0.0);}catch(_){}
             try{src.method("set_volume").invoke(1.0);}catch(_){}
+            log("[SOUND] AudioSource ready");
             return true;
         } catch(e) { log("[SOUND] prep: "+e); return false; }
     }
+
+    function findPhotonRecorder() {
+        if (O.photonRecorder && !O.photonRecorder.handle.isNull()) return O.photonRecorder;
+        if (!RecorderClass) return null;
+        try {
+            const recs = ResourcesClass.method("FindObjectsOfTypeAll",1).inflate(RecorderClass).invoke();
+            if (recs && recs.length > 0) { O.photonRecorder = recs.get(0); return O.photonRecorder; }
+        } catch(_){}
+        return null;
+    }
+
+    function trySetMember(obj, names, value) {
+        for (const name of names) {
+            try { obj.method("set_"+name).invoke(value); return true; } catch(_){}
+            try { obj.field(name).value = value; return true; } catch(_){}
+        }
+        return false;
+    }
+
+    function playClipThroughRecorder(clip, fileName) {
+        try {
+            const recorder = findPhotonRecorder();
+            if (!recorder || recorder.handle.isNull()) return false;
+            let ok = false;
+            ok = trySetMember(recorder, ["SourceType","sourceType","InputSourceType"], 1) || ok;
+            ok = trySetMember(recorder, ["AudioClip","audioClip","clip"], clip) || ok;
+            ok = trySetMember(recorder, ["LoopAudioClip","loopAudioClip"], false) || ok;
+            ok = trySetMember(recorder, ["VoiceDetection","voiceDetection"], false) || ok;
+            ok = trySetMember(recorder, ["TransmitEnabled","transmitEnabled","RecordingEnabled","recordingEnabled"], true) || ok;
+            try { recorder.method("RestartRecording",0).invoke(); ok=true; } catch(_){}
+            try { recorder.method("StartRecording",0).invoke(); ok=true; } catch(_){}
+            if (!ok) return false;
+            // Also play locally
+            try {
+                O.soundSource.method("set_spatialBlend").invoke(0.0);
+                O.soundSource.method("set_clip").invoke(clip);
+                O.soundSource.method("set_volume").invoke(1.0);
+                if (!O.soundSource.method("get_isPlaying").invoke()) O.soundSource.method("Play").invoke();
+            } catch(_){}
+            return true;
+        } catch(e) { log("[SOUND] Mic route failed: "+e); return false; }
+    }
+
     function getAudioType(name) {
         const l=(name||"").toLowerCase();
         if(l.endsWith(".mp3"))return 13;if(l.endsWith(".ogg"))return 14;return 20;
     }
-    function playSound(fileName) {
-        if (!webReqMultiImage) { flash("No multimedia module"); return; }
+
+    function getSoundFileUrl(path, fileName) {
+        let fullPath = (path || "") + (fileName || "");
+        fullPath = fullPath.replace(/\\/g, "/");
+        if (!fullPath.startsWith("/")) fullPath = "/" + fullPath;
+        return encodeURI("file://" + fullPath).replace(/#/g, "%23");
+    }
+
+    function playSound(fileName, useMic) {
+        if (!webReqMultiImage) { flash("No audio module"); return; }
         const path = ensureSoundsPath();
         if (!path||!fileName) return;
         if (!prepareSoundboard()) { flash("AudioSource failed"); return; }
+
+        // Abort previous request
         try {
-            if(O.soundReq&&!O.soundReq.isNull()){try{O.soundReq.method("Abort").invoke();}catch(_){}try{O.soundReq.method("Dispose").invoke();}catch(_){}}
+            if(O.soundReq && !O.soundReq.handle.isNull()){
+                try{O.soundReq.method("Abort").invoke();}catch(_){}
+                try{O.soundReq.method("Dispose").invoke();}catch(_){}
+            }
         }catch(_){}
+
         try {
-            const url = "file://" + path + fileName;
-            const UWRMulti = webReqMultiImage.class("UnityEngine.Networking.UnityWebRequestMultimedia");
+            const url = getSoundFileUrl(path, fileName);
+            log("[SOUND] Loading: " + url);
+
+            // Try multiple class locations for UnityWebRequestMultimedia
+            let UWRMulti = null;
+            const classNames = ["UnityEngine.Networking.UnityWebRequestMultimedia"];
+            for (const cn of classNames) {
+                try { UWRMulti = webReqMultiImage.class(cn); if(UWRMulti) break; } catch(_){}
+            }
+            if (!UWRMulti) { flash("No UWR Multimedia class"); return; }
+
             const req = UWRMulti.method("GetAudioClip",2).invoke(Il2Cpp.string(url), getAudioType(fileName));
             req.method("SendWebRequest").invoke();
             O.soundReq = req;
+            O.soundReqKind = "uwr";
             O.soundPending = fileName;
-            flash("Loading: " + fileName);
-        } catch(e) { log("[SOUND] play: "+e); }
+            O.soundUseMic = !!useMic;
+            try { O.soundSource.method("set_spatialBlend").invoke(useMic ? 1.0 : 0.0); } catch(_){}
+            flash("Loading: " + fileName + (useMic ? " (Mic)" : ""));
+        } catch(e) { log("[SOUND] play: "+e); flash("Sound error: "+e.message); }
     }
+
     function tickSoundboard() {
-        if (!O.soundReq||O.soundReq.isNull()) return;
+        if (!O.soundReq || O.soundReq.handle.isNull()) return;
         try { if(!O.soundReq.method("get_isDone").invoke()) return; } catch(_){ return; }
-        const req = O.soundReq, pending = O.soundPending;
-        O.soundReq=null; O.soundPending="";
+
+        const req = O.soundReq, pending = O.soundPending, useMic = O.soundUseMic;
+        O.soundReq = null; O.soundPending = ""; O.soundUseMic = false;
+
         try {
-            const handler = req.method("get_downloadHandler").invoke();
             let clip = null;
-            if (handler&&!handler.isNull()) {
-                if (webReqAudioImage) {
+
+            // Method 1: DownloadHandlerAudioClip.GetContent
+            try {
+                const classNames = [
+                    "UnityEngine.Networking.DownloadHandlerAudioClip",
+                ];
+                for (const cn of classNames) {
                     try {
-                        const DHAClip = webReqAudioImage.class("UnityEngine.Networking.DownloadHandlerAudioClip");
-                        clip = DHAClip.method("GetContent",1).invoke(req);
+                        const DHAClip = webReqMultiImage.class(cn);
+                        if (DHAClip) {
+                            clip = DHAClip.method("GetContent",1).invoke(req);
+                            if (clip && !clip.handle.isNull()) break;
+                            clip = null;
+                        }
                     } catch(_){}
                 }
-                if(!clip||clip.isNull()) try{clip=handler.method("get_audioClip").invoke();}catch(_){}
+            } catch(_){}
+
+            // Method 2: handler.get_audioClip
+            if (!clip || clip.handle.isNull()) {
+                try {
+                    const handler = req.method("get_downloadHandler").invoke();
+                    if (handler && !handler.handle.isNull()) {
+                        try { clip = handler.method("get_audioClip").invoke(); } catch(_){}
+                        if (!clip || clip.handle.isNull()) {
+                            try { clip = handler.method("GetAudioClip").invoke(); } catch(_){}
+                        }
+                    }
+                } catch(_){}
             }
-            if(clip&&!clip.isNull()&&O.soundSource&&!O.soundSource.isNull()){
+
+            if (clip && !clip.handle.isNull() && O.soundSource && !O.soundSource.handle.isNull()) {
                 O.soundSource.method("set_clip").invoke(clip);
                 O.soundSource.method("Play").invoke();
-                flash("Playing: "+pending);
-            } else flash("Failed: "+pending);
-        } catch(e){log("[SOUND] load: "+e);}
+                const micOk = useMic ? playClipThroughRecorder(clip, pending) : false;
+                flash((micOk ? "Playing (mic+headset): " : "Playing: ") + pending);
+            } else {
+                // Log the error for debugging
+                try {
+                    const err = req.method("get_error").invoke();
+                    if (err && !err.handle.isNull()) log("[SOUND] Request error: " + err.toString());
+                } catch(_){}
+                flash("Failed to load: " + pending);
+            }
+        } catch(e) { log("[SOUND] load: "+e); }
         try{req.method("Dispose").invoke();}catch(_){}
     }
 
@@ -878,12 +1266,19 @@ Il2Cpp.perform(() => {
             {l:"Item Gun (grip+trigger)",t:"tog",k:"itemGunOn"},
             {l:"TP Gun (grip+trigger)",t:"tog",k:"tpGunOn"},
             {l:"Kick Gun (grip+trigger)",t:"tog",k:"kickGunOn"},
+            {l:"<color=#44ccff>Snowball Launcher</color>",t:"tog",k:"snowballOn"},
+            {l:"Snowball Type: "+SNOWBALL_ITEMS[O.snowballIdx].replace("item_",""),t:"act",fn:()=>{
+                O.snowballIdx=(O.snowballIdx+1)%SNOWBALL_ITEMS.length;
+                flash("Ammo: "+SNOWBALL_ITEMS[O.snowballIdx].replace("item_",""));
+            }},
         ];
         case "player": return [{l:"< Back",t:"back"},
             {l:"Invincible",t:"tog",k:"invincibleOn"},
             {l:"Invisible",t:"tog",k:"invisibleOn"},
             {l:"No Red Watch",t:"tog",k:"noRedWatchOn"},
             {l:"RPC Shield (Anti-Kick)",t:"tog",k:"shieldOn"},
+            {l:"<color=#ff4444>Anti-Modder (Abyss TP)</color>",t:"tog",k:"antiModderOn"},
+            {l:"Clear Modder List",t:"act",fn:()=>{O.detectedModders={};flash("Modder list cleared");}},
         ];
         case "op": return [{l:"< Back",t:"back"},
             {l:"Orbit All",t:"tog",k:"orbitAllOn"},
@@ -891,7 +1286,6 @@ Il2Cpp.perform(() => {
             {l:"Yeet All",t:"act",fn:actYeetAll},
             {l:"Stink All",t:"act",fn:actStinkAll},
             {l:"Color All",t:"act",fn:actColorAll},
-            {l:"Fling All",t:"act",fn:actFlingAll},
             {l:"Void All",t:"act",fn:actVoidAll},
             {l:"Money All $99999",t:"act",fn:actMoneyAll},
             {l:"Stun All 30s",t:"act",fn:actStunAll},
@@ -916,7 +1310,6 @@ Il2Cpp.perform(() => {
     function buildPrefabPage() {
         const tp=Math.max(1,Math.ceil(PREFAB_NAMES.length/PER_PAGE)),pg=Math.min(O.page,tp-1),s=pg*PER_PAGE,e=Math.min(s+PER_PAGE,PREFAB_NAMES.length);
         const its=[{l:"< Back",t:"back"}];
-        // Prefab orbit controls at top
         its.push({l:"Prefab Orbit: "+(O.prefabOrbitOn?"ON":"OFF")+" ["+PREFAB_NAMES[O.prefabOrbitIdx]+"]",t:"act",fn:()=>{
             if(O.prefabOrbitOn){stopPrefabOrbit();flash("Prefab Orbit OFF");}
             else{O.prefabOrbitOn=true;O.prefabOrbitCd=0;flash("Orbiting: "+PREFAB_NAMES[O.prefabOrbitIdx]);}
@@ -940,15 +1333,30 @@ Il2Cpp.perform(() => {
     function buildSoundPage() {
         const its=[{l:"< Back",t:"back"}];
         its.push({l:"Refresh Sounds",t:"act",fn:refreshSoundList});
-        its.push({l:"Stop Sound",t:"act",fn:()=>{try{if(O.soundSource)O.soundSource.method("Stop").invoke();}catch(_){}flash("Stopped");}});
+        its.push({l:"Stop Sound",t:"act",fn:()=>{
+            try{if(O.soundSource)O.soundSource.method("Stop").invoke();}catch(_){}
+            // Also stop mic
+            try{
+                const rec=findPhotonRecorder();
+                if(rec){trySetMember(rec,["TransmitEnabled","transmitEnabled","RecordingEnabled","recordingEnabled"],false);}
+            }catch(_){}
+            flash("Stopped");
+        }});
         if(O.soundFiles.length===0){
-            its.push({l:"(no sounds — put .wav/.ogg in Sounds folder)",t:"act",fn:()=>{}});
+            its.push({l:"(put .wav/.ogg/.mp3 in Sounds folder)",t:"act",fn:()=>{
+                const p=ensureSoundsPath();flash("Path: "+(p||"unknown"));
+            }});
         } else {
             const tp=Math.max(1,Math.ceil(O.soundFiles.length/PER_PAGE)),pg=Math.min(O.page,tp-1),s=pg*PER_PAGE,e=Math.min(s+PER_PAGE,O.soundFiles.length);
             for(let i=s;i<e;i++){
                 const f=O.soundFiles[i];
-                its.push({l:"♫ "+f,t:"act",fn:(function(x){return function(){playSound(x);};})(f)});
+                its.push({l:"♫ "+f,t:"act",fn:(function(x){return function(){playSound(x, false);};})(f)});
             }
+            // Mic passthrough option
+            its.push({l:"\u{1F3A4} Play Through Mic",t:"act",fn:()=>{
+                if(O.soundFiles.length>0) playSound(O.soundFiles[Math.min(O.soundIdx,O.soundFiles.length-1)], true);
+                else flash("No sounds loaded");
+            }});
             if(pg>0)its.push({l:"◀ Prev",t:"act",fn:()=>{O.page--;O.cursor=1;}});
             if(e<O.soundFiles.length)its.push({l:"Next ▶",t:"act",fn:()=>{O.page++;O.cursor=1;}});
         }
@@ -960,7 +1368,7 @@ Il2Cpp.perform(() => {
     // ================================================================
     function renderVRText() {
         const its=menuItems();
-        const L=["<b><color=#bb88ff>Orbit Menu V7.0"+tabTitle()+"</color></b>",""];
+        const L=["<b><color=#bb88ff>Orbit Menu V7.1"+tabTitle()+"</color></b>",""];
         for(let i=0;i<its.length;i++){const it=its[i];const c=(i===O.cursor)?"<color=#ffcc00>▶</color> ":"   ";let t=it.l;
             if(it.t==="tog") t+=O[it.k]?" <color=#00ff00>[ON]</color>":" <color=#ff4444>[OFF]</color>";
             else if(it.t==="tab") t+=" ▸";
@@ -969,6 +1377,7 @@ Il2Cpp.perform(() => {
         if(O.actionMsg&&(O.tick-O.actionTick)<180) L.push("<color=#00ffaa>"+O.actionMsg+"</color>");
         if(O.flyOn) L.push("<color=#88ccff>✈ Fly ON</color>");
         if(O.shieldOn) L.push("<color=#44ff44>⛨ Shield ON</color>");
+        if(O.antiModderOn) L.push("<color=#ff4444>⚠ Anti-Modder ON ("+Object.keys(O.detectedModders).length+" caught)</color>");
         L.push("<size=9><color=#666>R-Stick=nav  B/Trigger=sel</color></size>");
         return L.join("\n");
     }
@@ -996,9 +1405,11 @@ Il2Cpp.perform(() => {
     function onToggle(k,on) {
         if(k==="flyOn")toggleFly(on);
         if(k==="platformsOn"&&!on){destroySafe(O.platL);O.platL=null;O.platLLatched=false;destroySafe(O.platR);O.platR=null;O.platRLatched=false;}
-        if(k==="itemGunOn"){O.gunCd=0;if(!on)hideGun();if(on){O.tpGunOn=false;O.kickGunOn=false;}}
-        if(k==="tpGunOn"){O.gunCd=0;if(!on)hideGun();if(on){O.itemGunOn=false;O.kickGunOn=false;}}
-        if(k==="kickGunOn"){O.gunCd=0;if(!on)hideGun();if(on){O.itemGunOn=false;O.tpGunOn=false;}}
+        // Mutual exclusion: guns + snowball (only one active)
+        if(k==="itemGunOn"){O.gunCd=0;if(!on)hideGun();if(on){O.tpGunOn=false;O.kickGunOn=false;O.snowballOn=false;}}
+        if(k==="tpGunOn"){O.gunCd=0;if(!on)hideGun();if(on){O.itemGunOn=false;O.kickGunOn=false;O.snowballOn=false;}}
+        if(k==="kickGunOn"){O.gunCd=0;if(!on)hideGun();if(on){O.itemGunOn=false;O.tpGunOn=false;O.snowballOn=false;}}
+        if(k==="snowballOn"){if(on){O.itemGunOn=false;O.tpGunOn=false;O.kickGunOn=false;hideGun();}}
         if(k==="itemOrbitOn"){if(on)startItemOrbit();else stopItemOrbit();}
         if(k==="invincibleOn")toggleInvincible(on);
         if(k==="invisibleOn")toggleInvisible(on);
@@ -1006,6 +1417,7 @@ Il2Cpp.perform(() => {
         if(k==="longArmsOn")toggleLongArms(on);
         if(k==="orbitAllOn")flash(on?"Orbit All ON":"Orbit All OFF");
         if(k==="shieldOn"){if(on)installShield();else flash("Shield stays active (hooks can't be removed)");}
+        if(k==="antiModderOn"){O.detectedModders={};O.playerPositions={};flash(on?"Anti-Modder ON — watching...":"Anti-Modder OFF");}
     }
 
     // ================================================================
@@ -1023,7 +1435,7 @@ Il2Cpp.perform(() => {
             const mGO=GameObjectClass.method("CreatePrimitive").invoke(3);
             mGO.method("set_name").invoke(Il2Cpp.string("[Orbit Menu]"));
             try{getComponent(mGO,RendererClass).method("set_enabled").invoke(false);}catch(_){}
-            try{getComponent(mGO,ColliderClass).method("set_enabled").invoke(false);}catch(_){}
+            try{const c=getComponent(mGO,ColliderClass);if(c)Destroy(c);}catch(_){}
             getTransform(mGO).method("SetParent",2).invoke(head,false);
             getTransform(mGO).method("set_localPosition").invoke([-0.15,0,0.45]);
             getTransform(mGO).method("set_localRotation").invoke([0,0,0,1]);
@@ -1032,7 +1444,7 @@ Il2Cpp.perform(() => {
             const tGO=GameObjectClass.method("CreatePrimitive").invoke(3);
             tGO.method("set_name").invoke(Il2Cpp.string("[Orbit Text]"));
             try{getComponent(tGO,RendererClass).method("set_enabled").invoke(false);}catch(_){}
-            try{getComponent(tGO,ColliderClass).method("set_enabled").invoke(false);}catch(_){}
+            try{const c=getComponent(tGO,ColliderClass);if(c)Destroy(c);}catch(_){}
             getTransform(tGO).method("SetParent",2).invoke(getTransform(mGO),false);
             const mt=addComponent(tGO,TextClass);
             if(font)mt.method("set_font").invoke(font);
@@ -1063,16 +1475,17 @@ Il2Cpp.perform(() => {
         if(!O.menuInited&&!O.buildFailed)initMenu();
         if(O.menuInited){
             processVRInput(); tickFly(); tickPlatforms(); tickOrbitAll(); tickItemOrbit();
-            tickPrefabOrbit(); tickMobSpawn(); tickSoundboard();
+            tickPrefabOrbit(); tickMobSpawn(); tickSoundboard(); tickAntiModder();
             // Guns (only one active at a time)
             if(O.itemGunOn) tickItemGun();
             else if(O.tpGunOn) tickTPGun();
             else if(O.kickGunOn) tickKickGun();
+            else if(O.snowballOn) tickSnowball();
             else hideGun();
             if(O.noRedWatchOn&&O.tick%60===0)toggleNoRedWatch(true);
             setText(renderVRText());
         }
-        if(O.tick-O.lastLog>=300){O.lastLog=O.tick;log("t="+O.tick+" fly="+O.flyOn+" gun="+O.itemGunOn+"/"+O.tpGunOn+"/"+O.kickGunOn+" shield="+O.shieldOn);}
+        if(O.tick-O.lastLog>=300){O.lastLog=O.tick;log("t="+O.tick+" fly="+O.flyOn+" guns="+O.itemGunOn+"/"+O.tpGunOn+"/"+O.kickGunOn+"/"+O.snowballOn+" shield="+O.shieldOn+" antimod="+O.antiModderOn);}
     }
 
     // ================================================================
@@ -1087,7 +1500,7 @@ Il2Cpp.perform(() => {
         if(!tgt){log("ERROR: no update method");}
         else{Interceptor.attach(tgt.virtualAddress,{onEnter(){try{onTick();}catch(e){if(O.tick%600===0)log("tick err: "+e);}}});O.hookInstalled=true;log("hook on GorillaLocomotion."+tgt.name);}
     }
-    log("===== Orbit Menu V7.0 READY =====");
-    log("Features: Shield, Kick Gun, TP Gun, Item Gun, Prefab Orbit, Stealth Mobs, Names, Soundboard");
+    log("===== Orbit Menu V7.1 READY =====");
+    log("Features: Shield, RPC Bypass, Kick/TP/Item Gun, Snowball, Anti-Modder, Names, Soundboard");
 });
 }, 5000);
