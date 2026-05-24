@@ -1,11 +1,11 @@
 // ====================================================================
-//  Orbit Menu V6.1 — Animal Company
-//  Fixed: B-button selection, softer joystick, orbit-all debug,
-//         item gun, OP actions visible/working.
+//  Orbit Menu V6.3 — Animal Company
+//  Fixed player iteration (FindObjectsOfType instead of HashSet).
+//  New: Prefabs tab with paginated item spawning.
 // ====================================================================
 
 Il2Cpp.perform(() => {
-    console.log("[Orbit] ===== Orbit Menu V6.1 LOADING =====");
+    console.log("[Orbit] ===== Orbit Menu V6.3 LOADING =====");
 
     // ---- assemblies ----
     const acImage    = Il2Cpp.domain.assembly("AnimalCompany").image;
@@ -29,7 +29,6 @@ Il2Cpp.perform(() => {
     const XRInputManagerClass    = acImage.class("AnimalCompany.XRInputManager");
     const NetPlayerClass         = acImage.class("AnimalCompany.NetPlayer");
 
-    // PrefabGenerator for item spawning
     let PrefabGeneratorClass = null;
     try { PrefabGeneratorClass = acImage.class("AnimalCompany.PrefabGenerator"); } catch(_) {}
 
@@ -44,34 +43,24 @@ Il2Cpp.perform(() => {
 
         cursor: 0,
         tab: "main",
+        prefabPage: 0,
 
         joyCd: 0,
         selWas: false,
 
-        // mod toggles
         platformsOn: false,
         flyOn: false,
         orbitAllOn: false,
         itemGunOn: false,
 
-        // platform handles
-        platL: null,
-        platR: null,
-
-        // fly
+        platL: null, platR: null,
         savedGrav: null,
-
-        // orbit-all
         orbitAngle: 0,
-
-        // item gun
         gunCd: 0,
 
-        // action flash
         actionMsg: "",
         actionTick: 0,
 
-        // logging
         lastLog: 0,
         lastText: "",
         headWaitTick: 0,
@@ -81,7 +70,29 @@ Il2Cpp.perform(() => {
     function log(m) { console.log("[Orbit] " + m); }
 
     // ================================================================
-    //  HELPERS — singletons & transforms
+    //  SAFE VALUE HELPERS
+    // ================================================================
+    function readBool(v) {
+        if (v === true) return true;
+        if (v === false || v === null || v === undefined) return false;
+        try {
+            const u = v.unbox();
+            if (typeof u === "boolean") return u;
+            if (typeof u === "number") return u !== 0;
+            return false;
+        } catch(_) {}
+        return false;
+    }
+
+    function readInt(v) {
+        if (typeof v === "number") return v;
+        try { const u = v.unbox(); if (typeof u === "number") return u; } catch(_){}
+        const n = parseInt(String(v), 10);
+        return isNaN(n) ? 0 : n;
+    }
+
+    // ================================================================
+    //  SINGLETONS & TRANSFORMS
     // ================================================================
     function playerInst() {
         try {
@@ -118,9 +129,8 @@ Il2Cpp.perform(() => {
     function handTf(side) {
         const p = playerInst();
         if (!p) return null;
-        const fname = side === 0 ? "_handTransformLeft" : "_handTransformRight";
         try {
-            const v = p.field(fname).value;
+            const v = p.field(side === 0 ? "_handTransformLeft" : "_handTransformRight").value;
             if (v && !v.handle.isNull()) return v;
         } catch (_) {}
         return null;
@@ -147,83 +157,58 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  PLAYER ITERATION — with safe int/bool parsing
+    //  PLAYER ITERATION — FindObjectsOfType (like ACCompanion)
+    //  get_spawnedPlayers() returns a HashSet without get_Item().
+    //  FindObjectsOfType returns a raw array with index access.
     // ================================================================
-    function readInt(v) {
-        if (typeof v === "number") return v;
-        // Boxed int from IL2CPP — try unbox
-        try { const u = v.unbox(); if (typeof u === "number") return u; } catch(_){}
-        // Last resort: parse string representation
-        const n = parseInt(String(v), 10);
-        return isNaN(n) ? 0 : n;
-    }
-
-    function forEachOtherPlayer(fn) {
+    function getOtherPlayers() {
+        const others = [];
         try {
-            const allPlayers = NetPlayerClass.method("get_spawnedPlayers").invoke();
-            if (!allPlayers || allPlayers.handle.isNull()) {
-                if (O.tick % 300 === 0) log("get_spawnedPlayers returned null");
-                return 0;
-            }
+            // Get local player handle for comparison
             const localP = NetPlayerClass.method("get_localPlayer").invoke();
             const localH = localP ? localP.handle.toString() : "";
 
-            let count = 0;
-            try { count = readInt(allPlayers.method("get_Count").invoke()); } catch(_) { return 0; }
-
-            // One-time diagnostic on first call
-            if (!O._diagDone) {
-                O._diagDone = true;
-                log("DIAG: count=" + count + " type=" + typeof count);
-                for (let d = 0; d < Math.min(count, 3); d++) {
-                    try {
-                        const dp = allPlayers.method("get_Item").invoke(d);
-                        const rawMine = dp.method("get_IsMine").invoke();
-                        log("  [" + d + "] rawMine=" + rawMine +
-                            " typeof=" + typeof rawMine +
-                            " readBool=" + readBool(rawMine) +
-                            " handle=" + dp.handle.toString());
-                    } catch(e) { log("  [" + d + "] err: " + e); }
-                }
-                log("  localH=" + localH);
+            // FindObjectsOfType<NetPlayer>() — returns Il2Cpp.Array
+            let arr = null;
+            try {
+                arr = ObjectClass.method("FindObjectsOfType", 1).invoke(NetPlayerClass.type);
+            } catch(_) {}
+            if (!arr) {
+                try {
+                    arr = ResourcesClass.method("FindObjectsOfTypeAll", 1).invoke(NetPlayerClass.type);
+                } catch(_) {}
             }
+            if (!arr) return others;
 
-            let affected = 0;
-            for (let i = 0; i < count; i++) {
-                let np;
-                try { np = allPlayers.method("get_Item").invoke(i); } catch(_) { continue; }
-                if (!np || np.handle.isNull()) continue;
-
-                // Skip local player — use handle comparison (most reliable)
-                if (localH && np.handle.toString() === localH) continue;
-
-                try { fn(np); affected++; } catch(e) {
-                    if (O.tick % 300 === 0) log("forEachOther item err: " + e);
-                }
+            const len = arr.length;
+            for (let i = 0; i < len; i++) {
+                try {
+                    const np = arr.get(i);
+                    if (!np || np.handle.isNull()) continue;
+                    if (localH && np.handle.toString() === localH) continue;
+                    others.push(np);
+                } catch(_) {}
             }
-            return affected;
         } catch(e) {
-            if (O.tick % 300 === 0) log("forEachOtherPlayer err: " + e);
-            return 0;
+            if (O.tick % 300 === 0) log("getOtherPlayers err: " + e);
         }
+        return others;
+    }
+
+    function forEachOtherPlayer(fn) {
+        const others = getOtherPlayers();
+        let affected = 0;
+        for (const np of others) {
+            try { fn(np); affected++; } catch(e) {
+                if (O.tick % 300 === 0) log("forEach item err: " + e);
+            }
+        }
+        return affected;
     }
 
     // ================================================================
-    //  XR INPUT — fixed with unboxing
+    //  XR INPUT
     // ================================================================
-    function readBool(v) {
-        if (v === true) return true;
-        if (v === false || v === null || v === undefined) return false;
-        // Boxed boolean from IL2CPP — must unbox to get real value
-        try {
-            const u = v.unbox();
-            if (typeof u === "boolean") return u;
-            if (typeof u === "number") return u !== 0;
-            return false; // Don't trust !!object — boxed false is still truthy
-        } catch(_) {}
-        return false; // Safer default than !!v which is always true for objects
-    }
-
     function joyY(hand) {
         try {
             const r = XRInputManagerClass.method("GetJoystickValue").invoke(hand);
@@ -243,20 +228,99 @@ Il2Cpp.perform(() => {
         catch (_) { return false; }
     }
 
-    // B button — try GetButtonDown with proper unboxing
     function bBtn(hand) {
-        // Try GetButtonDown(handSide, button)
-        // Button enum: 0=primary(A/X), 1=secondary(B/Y)
         try {
             const v = XRInputManagerClass.method("GetButtonDown").invoke(hand, 1);
             if (readBool(v)) return true;
         } catch(_){}
-        // Also try button index 0 (some games swap A/B)
         try {
             const v = XRInputManagerClass.method("GetButtonDown").invoke(hand, 0);
             if (readBool(v)) return true;
         } catch(_){}
         return false;
+    }
+
+    // ================================================================
+    //  PREFAB LIST (from ACCompanion item database)
+    // ================================================================
+    const PREFABS = [
+        // -- Weapons --
+        "item_dynamite","item_grenade","item_rpg","item_rpg_ammo",
+        "item_shotgun","item_revolver","item_flamethrower",
+        "item_demon_sword","item_great_sword","item_hookshot_sword",
+        "item_crossbow","item_pistol_dragon","item_grenade_launcher",
+        "item_lance","item_baseball_bat","item_crowbar","item_hatchet",
+        "item_viking_hammer","item_radiation_gun","item_heart_gun",
+        "item_flaregun","item_alphablade","item_cluster_grenade",
+        // -- Tools --
+        "item_jetpack","item_hookshot","item_teleport_gun",
+        "item_flashlight","item_flashlight_mega","item_broom",
+        "item_pickaxe","item_drill","item_zipline_gun",
+        "item_pogostick","item_portable_teleporter","item_hoverpad",
+        "item_boomerang","item_guided_boomerang","item_friend_launcher",
+        "item_moneygun","item_scanner","item_megaphone",
+        // -- Explosives / Troll --
+        "item_landmine","item_sticky_dynamite","item_impulse_grenade",
+        "item_flashbang","item_broccoli_grenade","item_tripwire_explosive",
+        "item_pumpkin_bomb","item_timebomb","item_stinky_cheese",
+        "item_anti_gravity_grenade","item_dynamite_cube",
+        // -- Valuables --
+        "item_goldbar","item_goldcoin","item_ruby",
+        "item_diamond_jade_koi","item_trophy","item_rare_card",
+        "item_ceo_plaque","item_stellarsword_gold","item_ore_gold_l",
+        // -- Fun --
+        "item_boombox","item_ukulele","item_balloon",
+        "item_whoopie","item_glowstick","item_rubberducky",
+        "item_metal_ball","item_snowball","item_trampoline",
+        "item_robo_monke","item_saddle","item_cardboard_box",
+        // -- Food --
+        "item_apple","item_banana","item_burrito",
+        "item_popcorn","item_turkey_leg","item_hot_cocoa",
+    ];
+    const PER_PAGE = 5;
+    const TOTAL_PAGES = Math.ceil(PREFABS.length / PER_PAGE);
+
+    // ================================================================
+    //  SPAWN PREFAB
+    // ================================================================
+    function spawnPrefab(itemId) {
+        const head = headTf();
+        const pos = readPos(head);
+        const fwd = readFwd(head);
+        if (!pos || !fwd) { flashAction("no head"); return; }
+
+        const sx = pos.x + fwd.x * 2;
+        const sy = pos.y + fwd.y * 2;
+        const sz = pos.z + fwd.z * 2;
+
+        let ok = false;
+        if (PrefabGeneratorClass) {
+            // Try static SpawnItem(string, Vector3, Quaternion, Transform)
+            try {
+                PrefabGeneratorClass.method("SpawnItem", 4).invoke(
+                    Il2Cpp.string(itemId), [sx, sy, sz], [0,0,0,1], NULL
+                );
+                ok = true;
+            } catch(e) {
+                log("spawn4 err: " + e);
+            }
+            // Try 3-param overload
+            if (!ok) {
+                try {
+                    PrefabGeneratorClass.method("SpawnItem", 3).invoke(
+                        Il2Cpp.string(itemId), [sx, sy, sz], [0,0,0,1]
+                    );
+                    ok = true;
+                } catch(e) {
+                    log("spawn3 err: " + e);
+                }
+            }
+        }
+        if (ok) {
+            flashAction("Spawned " + itemId.replace("item_",""));
+        } else {
+            flashAction("spawn failed");
+        }
     }
 
     // ================================================================
@@ -268,15 +332,12 @@ Il2Cpp.perform(() => {
         log(msg);
     }
 
-    // TP All to Me — RPC_Teleport(Vector3)
     function actTpAllToMe() {
         const myPos = readPos(headTf());
         if (!myPos) { flashAction("no head pos"); return; }
         let n = 0;
         forEachOtherPlayer(np => {
-            // Try RPC first (network synced)
             try { np.method("RPC_Teleport", 1).invoke([myPos.x, myPos.y, myPos.z]); n++; return; } catch(_) {}
-            // Fallback: direct transform
             try {
                 const tf = np.method("get_transform").invoke();
                 if (tf && !tf.handle.isNull()) { tf.method("set_position").invoke([myPos.x, myPos.y, myPos.z]); n++; }
@@ -285,7 +346,6 @@ Il2Cpp.perform(() => {
         flashAction("TP'd " + n + " to you!");
     }
 
-    // Yeet All — RPC_AddForce(Vector3) upward
     function actYeetAll() {
         let n = 0;
         forEachOtherPlayer(np => {
@@ -294,7 +354,6 @@ Il2Cpp.perform(() => {
         flashAction("Yeeted " + n + "!");
     }
 
-    // Stink All — RPC_TagAsStinky()
     function actStinkAll() {
         let n = 0;
         forEachOtherPlayer(np => {
@@ -303,21 +362,17 @@ Il2Cpp.perform(() => {
         flashAction("Stinked " + n + "!");
     }
 
-    // Color All — RPC_SetColorHSV(float h, float s, float v, float a) — 4 params per dump
     function actColorAll() {
         let n = 0;
         forEachOtherPlayer(np => {
             const h = Math.random() * 360;
             try { np.method("RPC_SetColorHSV", 4).invoke(h, 1.0, 1.0, 1.0); n++; } catch(_) {
-                try { np.method("RPC_SetColorHSV", 3).invoke(h, 1.0, 1.0); n++; } catch(_2) {
-                    try { np.method("RPC_SetColorHSV").invoke(h, 1.0, 1.0, 1.0); n++; } catch(_3) {}
-                }
+                try { np.method("RPC_SetColorHSV", 3).invoke(h, 1.0, 1.0); n++; } catch(_2) {}
             }
         });
         flashAction("Colored " + n + "!");
     }
 
-    // Fling All Up — massive upward force
     function actFlingAll() {
         let n = 0;
         forEachOtherPlayer(np => {
@@ -328,7 +383,6 @@ Il2Cpp.perform(() => {
         flashAction("Flung " + n + "!");
     }
 
-    // Void All — RPC_Teleport to Y=-500
     function actVoidAll() {
         let n = 0;
         forEachOtherPlayer(np => {
@@ -342,7 +396,6 @@ Il2Cpp.perform(() => {
         flashAction("Voided " + n + "!");
     }
 
-    // Money All — RPC_AddPlayerMoney(int)
     function actMoneyAll() {
         let n = 0;
         forEachOtherPlayer(np => {
@@ -360,6 +413,7 @@ Il2Cpp.perform(() => {
             {l:"Movement",  t:"tab", to:"move"},
             {l:"Items",     t:"tab", to:"items"},
             {l:"<color=#ff3333>Overpowered</color>", t:"tab", to:"op"},
+            {l:"<color=#55ccff>Prefabs</color>", t:"tab", to:"prefabs"},
         ];
         case "move": return [
             {l:"< Back",    t:"back"},
@@ -381,22 +435,46 @@ Il2Cpp.perform(() => {
             {l:"Void All",     t:"act", fn: actVoidAll},
             {l:"Money All",    t:"act", fn: actMoneyAll},
         ];
+        case "prefabs": return buildPrefabPage();
         default: return [];
         }
     }
 
+    function buildPrefabPage() {
+        const page = O.prefabPage;
+        const start = page * PER_PAGE;
+        const end = Math.min(start + PER_PAGE, PREFABS.length);
+
+        const list = [{l:"< Back", t:"back"}];
+        for (let i = start; i < end; i++) {
+            const id = PREFABS[i];
+            const display = id.replace("item_","");
+            list.push({l: display, t:"act", fn: () => spawnPrefab(id)});
+        }
+        if (page > 0) list.push({l:"◀ Prev Page", t:"act", fn: () => { O.prefabPage--; O.cursor = 1; }});
+        if (end < PREFABS.length) list.push({l:"Next Page ▶", t:"act", fn: () => { O.prefabPage++; O.cursor = 1; }});
+        return list;
+    }
+
     function tabTitle() {
         switch(O.tab) {
-        case "move":  return " > Movement";
-        case "items": return " > Items";
-        case "op":    return " > <color=#ff3333>OP</color>";
-        default:      return "";
+        case "move":    return " > Movement";
+        case "items":   return " > Items";
+        case "op":      return " > <color=#ff3333>OP</color>";
+        case "prefabs": return " > <color=#55ccff>Prefabs</color>";
+        default:        return "";
         }
     }
 
     function render() {
         const its = items();
-        const L = ["<color=#bb88ff>Orbit Menu" + tabTitle() + "</color>",""];
+        const L = ["<color=#bb88ff>Orbit Menu" + tabTitle() + "</color>"];
+
+        if (O.tab === "prefabs") {
+            L.push("<color=#aaaaaa>Page " + (O.prefabPage+1) + "/" + TOTAL_PAGES + "</color>");
+        }
+        L.push("");
+
         for (let i = 0; i < its.length; i++) {
             const it = its[i];
             const cur = (i === O.cursor) ? "<color=#ffcc00>▶</color> " : "   ";
@@ -406,13 +484,12 @@ Il2Cpp.perform(() => {
                                 : " <color=#ff4444>[OFF]</color>";
             } else if (it.t === "tab") {
                 txt += " ▸";
-            } else if (it.t === "act") {
+            } else if (it.t === "act" && O.tab !== "prefabs") {
                 txt = "<color=#ffaa44>" + txt + "</color>";
             }
             L.push(cur + txt);
         }
         L.push("");
-        // Action feedback flash (3 seconds)
         if (O.actionMsg && (O.tick - O.actionTick) < 180) {
             L.push("<color=#00ffaa>" + O.actionMsg + "</color>");
         }
@@ -421,31 +498,27 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  INPUT + NAVIGATION — softened
+    //  INPUT
     // ================================================================
     function processInput() {
         const yR = joyY(1), yL = joyY(0);
         const y = Math.abs(yR) > Math.abs(yL) ? yR : yL;
         const its = items();
 
-        // Softer joystick: higher threshold, longer cooldown
         if (O.joyCd > 0) { O.joyCd--; }
         else {
             if (y < -0.55 && O.cursor < its.length - 1) { O.cursor++; O.joyCd = 20; }
             else if (y > 0.55 && O.cursor > 0)           { O.cursor--; O.joyCd = 20; }
         }
 
-        // Selection: B button OR right trigger — both work
-        const bNow = bBtn(1);
-        const trigNow = trigger(1);
-        const selNow = bNow || trigNow;
+        const selNow = bBtn(1) || trigger(1);
         const press = selNow && !O.selWas;
         O.selWas = selNow;
 
         if (press && O.cursor < its.length) {
             const it = its[O.cursor];
             log("SELECT: " + it.l + " type=" + it.t);
-            if (it.t === "tab")       { O.tab = it.to; O.cursor = 0; }
+            if (it.t === "tab")       { O.tab = it.to; O.cursor = 0; if (it.to === "prefabs") O.prefabPage = 0; }
             else if (it.t === "back") { O.tab = "main"; O.cursor = 0; }
             else if (it.t === "tog")  {
                 O[it.k] = !O[it.k];
@@ -459,30 +532,19 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  MOD TOGGLE HANDLERS
+    //  TOGGLE HANDLERS
     // ================================================================
     function onToggle(k, on) {
-        if (k === "flyOn")      toggleFly(on);
+        if (k === "flyOn") toggleFly(on);
         if (k === "platformsOn" && !on) { killPlat(0); killPlat(1); }
         if (k === "orbitAllOn") {
             if (on) {
-                // Debug: log player count when toggling on
-                try {
-                    const all = NetPlayerClass.method("get_spawnedPlayers").invoke();
-                    let c = 0;
-                    if (all && !all.handle.isNull()) {
-                        try { c = all.method("get_Count").invoke(); } catch(_){}
-                    }
-                    log("Orbit All ON — " + c + " players in lobby");
-                } catch(e) { log("Orbit debug err: " + e); }
-            } else {
-                log("Orbit All OFF");
-            }
+                const n = getOtherPlayers().length;
+                log("Orbit All ON — " + n + " other players found");
+                if (n === 0) flashAction("no other players!");
+            } else { log("Orbit All OFF"); }
         }
-        if (k === "itemGunOn") {
-            log("Item Gun " + (on ? "ON" : "OFF"));
-            if (on) O.gunCd = 0;
-        }
+        if (k === "itemGunOn") { log("Item Gun " + (on?"ON":"OFF")); O.gunCd = 0; }
     }
 
     // ---- FLY ----
@@ -509,8 +571,7 @@ Il2Cpp.perform(() => {
             const rb = gl.method("get_playerRigidbody").invoke();
             if (!rb || rb.handle.isNull()) return;
             const y = joyY(1);
-            const head = headTf();
-            const fwd = readFwd(head);
+            const fwd = readFwd(headTf());
             if (!fwd) return;
             const sp = 7;
             if (Math.abs(y) > 0.25) {
@@ -555,7 +616,7 @@ Il2Cpp.perform(() => {
         if (grip(1)) ensurePlat(1); else killPlat(1);
     }
 
-    // ---- ORBIT ALL — fixed with multiple approaches ----
+    // ---- ORBIT ALL ----
     function tickOrbitAll() {
         if (!O.orbitAllOn) return;
         O.orbitAngle += 0.033;
@@ -564,15 +625,13 @@ Il2Cpp.perform(() => {
             const myPos = readPos(headTf());
             if (!myPos) return;
 
-            const radius = 3.8;
-            let others = [];
-            forEachOtherPlayer(np => { others.push(np); });
-
+            const others = getOtherPlayers();
             if (others.length === 0) {
-                if (O.tick % 300 === 0) log("orbitAll: 0 other players found");
+                if (O.tick % 300 === 0) log("orbitAll: 0 other players");
                 return;
             }
 
+            const radius = 3.8;
             const step = (2 * Math.PI) / others.length;
             for (let idx = 0; idx < others.length; idx++) {
                 const np = others[idx];
@@ -582,95 +641,38 @@ Il2Cpp.perform(() => {
                 const oy = myPos.y + 0.5;
 
                 let moved = false;
-
-                // Method 1: RPC_Teleport (network synced — most reliable for MP)
-                if (!moved) {
-                    try {
-                        np.method("RPC_Teleport", 1).invoke([ox, oy, oz]);
-                        moved = true;
-                    } catch(_) {}
-                }
-
-                // Method 2: avatarRoot.set_position (direct transform)
-                if (!moved) {
-                    try {
-                        const root = np.field("avatarRoot").value;
-                        if (root && !root.handle.isNull()) {
-                            root.method("set_position").invoke([ox, oy, oz]);
-                            moved = true;
-                        }
-                    } catch(_) {}
-                }
-
-                // Method 3: get_transform().set_position
-                if (!moved) {
-                    try {
-                        const tf = np.method("get_transform").invoke();
-                        if (tf && !tf.handle.isNull()) {
-                            tf.method("set_position").invoke([ox, oy, oz]);
-                            moved = true;
-                        }
-                    } catch(_) {}
-                }
+                // Method 1: RPC_Teleport (network synced)
+                if (!moved) try { np.method("RPC_Teleport", 1).invoke([ox, oy, oz]); moved = true; } catch(_) {}
+                // Method 2: avatarRoot transform
+                if (!moved) try {
+                    const root = np.field("avatarRoot").value;
+                    if (root && !root.handle.isNull()) { root.method("set_position").invoke([ox, oy, oz]); moved = true; }
+                } catch(_) {}
+                // Method 3: get_transform
+                if (!moved) try {
+                    const tf = np.method("get_transform").invoke();
+                    if (tf && !tf.handle.isNull()) { tf.method("set_position").invoke([ox, oy, oz]); moved = true; }
+                } catch(_) {}
             }
         } catch(e) {
             if (O.tick % 300 === 0) log("orbitAll err: " + e);
         }
     }
 
-    // ---- RANDOM ITEM GUN ----
-    const ITEM_IDS = [
-        "item_apple", "item_goldbar", "item_dynamite", "item_glowstick",
-        "item_metal_ball", "item_landmine", "item_teleport_gun",
-        "item_jetpack", "item_goldcoin", "item_stinky_cheese",
+    // ---- ITEM GUN ----
+    const GUN_ITEMS = [
+        "item_apple","item_goldbar","item_dynamite","item_glowstick",
+        "item_metal_ball","item_landmine","item_teleport_gun",
+        "item_jetpack","item_goldcoin","item_stinky_cheese",
     ];
 
     function tickItemGun() {
         if (!O.itemGunOn) return;
         if (O.gunCd > 0) { O.gunCd--; return; }
-
-        // Fire with right trigger
         if (!trigger(1)) return;
-        O.gunCd = 30; // ~0.5s cooldown between shots
-
-        const head = headTf();
-        const pos = readPos(head);
-        const fwd = readFwd(head);
-        if (!pos || !fwd) return;
-
-        // Spawn point: 2m in front of head
-        const sx = pos.x + fwd.x * 2;
-        const sy = pos.y + fwd.y * 2;
-        const sz = pos.z + fwd.z * 2;
-        const itemId = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
-
-        let spawned = false;
-
-        // Try PrefabGenerator.SpawnItem(string, Vector3, Quaternion, null)
-        if (PrefabGeneratorClass && !spawned) {
-            try {
-                PrefabGeneratorClass.method("SpawnItem", 4).invoke(
-                    Il2Cpp.string(itemId), [sx, sy, sz], [0, 0, 0, 1], NULL
-                );
-                spawned = true;
-            } catch(_) {}
-
-            // Try 3-param version
-            if (!spawned) {
-                try {
-                    PrefabGeneratorClass.method("SpawnItem", 3).invoke(
-                        Il2Cpp.string(itemId), [sx, sy, sz], [0, 0, 0, 1]
-                    );
-                    spawned = true;
-                } catch(_) {}
-            }
-        }
-
-        if (spawned) {
-            if (O.tick % 60 === 0) log("spawned " + itemId);
-        } else {
-            if (O.tick % 300 === 0) log("item gun: spawn failed (PrefabGenerator may need instance)");
-        }
+        O.gunCd = 30;
+        const itemId = GUN_ITEMS[Math.floor(Math.random() * GUN_ITEMS.length)];
+        spawnPrefab(itemId);
     }
 
     // ================================================================
@@ -703,7 +705,6 @@ Il2Cpp.perform(() => {
             }
 
             log("building menu...");
-
             const menuGO = GameObjectClass.method("CreatePrimitive").invoke(3);
             menuGO.method("set_name").invoke(Il2Cpp.string("[Orbit Menu]"));
             try { menuGO.method("GetComponent",1).inflate(RendererClass).invoke().method("set_enabled").invoke(false); } catch(_){}
@@ -740,11 +741,10 @@ Il2Cpp.perform(() => {
             } catch(_){}
 
             ObjectClass.method("DontDestroyOnLoad").invoke(menuGO);
-
             O.menuGO = menuGO;
             O.menuText = menuText;
             O.menuInited = true;
-            log("MENU BUILT — PrefabGen=" + (PrefabGeneratorClass ? "found" : "null"));
+            log("MENU BUILT — PrefabGen=" + (PrefabGeneratorClass?"yes":"no") + " items=" + PREFABS.length);
             setText(render());
         } catch(e) {
             O.buildFailed = true;
@@ -802,5 +802,5 @@ Il2Cpp.perform(() => {
         }
     }
 
-    log("===== Orbit Menu V6.1 READY =====");
+    log("===== Orbit Menu V6.3 READY =====");
 });
