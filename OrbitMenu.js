@@ -77,7 +77,8 @@ Il2Cpp.perform(() => {
     try { PrefabGenClass = acImage.class("AnimalCompany.PrefabGenerator"); } catch(_){}
 
     // ---- NULL + shaders ----
-    const NULL = Il2Cpp.object(ptr(0));
+    let NULL = ptr(0);
+    try { NULL = Il2Cpp.Object.from(ptr(0)); } catch(_) { try { NULL = new Il2Cpp.Object(ptr(0)); } catch(_2) {} }
     let UberShader = null;
     try { UberShader = ShaderClass.method("Find").invoke(Il2Cpp.string("Universal Render Pipeline/Unlit")); } catch(_){}
     let TextShader = null;
