@@ -1,12 +1,12 @@
 // ====================================================================
 //  Orbit Menu - Animal Company
-//  Cube menu prototype. Y toggles the panel, left stick moves, B selects.
+//  Lunar-style cube menu shell. Y toggles the panel, left stick moves, B selects.
 // ====================================================================
 
 (function () {
     "use strict";
 
-    const VERSION = "4.1";
+    const VERSION = "4.2";
     const LOG_TICKS = 300;
     const PHOTON_SCAN_TICKS = 120;
     const INPUT_REPEAT_TICKS = 14;
@@ -142,7 +142,7 @@
             try { go.method("SetActive").invoke(active); } catch (_) {}
         }
 
-        function addText(parent, text, y, z, size, col) {
+        function addText(parent, text, x, y, size, col) {
             if (!U.TextMesh) return null;
             const go = U.GameObject.new();
             try { go.method("set_name").invoke(Il2Cpp.string("[Orbit Label]")); } catch (_) {}
@@ -153,7 +153,7 @@
             try { tm.method("set_color").invoke(col); } catch (_) {}
             try { tm.method("set_anchor").invoke(3); } catch (_) {}
             try { tm.method("set_alignment").invoke(0); } catch (_) {}
-            setLocal(go, vec3(-0.032, y, z), vec3(0.018, 0.018, 0.018), euler(0, 90, 0));
+            setLocal(go, vec3(x, y, -0.055), vec3(0.011, 0.011, 0.011), euler(0, 180, 0));
             orbit.labels.push({ go: go, text: tm });
             return tm;
         }
@@ -365,25 +365,26 @@
             destroyRows();
             refreshPhotonPlayers();
 
-            addText(orbit.root, "Orbit V" + VERSION + "  " + (orbit.page === "main" ? "Tabs" : orbit.page), 0.0, 0.215, 34, color(0.74, 0.53, 1, 1));
+            addText(orbit.root, "ORBIT V" + VERSION, -0.18, 0.15, 34, color(0.74, 0.53, 1, 1));
+            addText(orbit.root, orbit.page === "main" ? "LUNAR STYLE TABS" : orbit.page.toUpperCase(), -0.18, 0.115, 20, color(0.65, 0.65, 0.7, 1));
             const items = currentItems();
             clampCursor();
 
-            const startZ = 0.13;
+            const startY = 0.06;
             for (let i = 0; i < items.length; i++) {
                 const item = items[i];
-                const z = startZ - i * 0.075;
+                const y = startY - i * 0.06;
                 const row = primitive(3, "[Orbit Button] " + item.label);
                 setParent(row, orbit.root);
-                setLocal(row, vec3(-0.006, 0, z), vec3(0.028, 0.36, 0.048), null);
+                setLocal(row, vec3(0, y, -0.035), vec3(0.42, 0.042, 0.018), null);
                 setColor(row, rowColor(item, i === orbit.cursor));
                 orbit.rows.push(row);
-                addText(orbit.root, (i === orbit.cursor ? "> " : "  ") + item.label + (item.locked ? "  locked" : ""), -0.145, z + 0.01, 30, item.type === "back" ? color(1, 0.2, 0.2, 1) : color(1, 1, 1, 1));
+                addText(orbit.root, (i === orbit.cursor ? "> " : "  ") + item.label + (item.locked ? "  locked" : ""), -0.185, y - 0.013, 26, item.type === "back" ? color(1, 0.2, 0.2, 1) : color(1, 1, 1, 1));
             }
 
-            addText(orbit.root, orbit.photonStatus, -0.16, -0.21, 22, color(0.5, 0.82, 1, 1));
+            addText(orbit.root, orbit.photonStatus, -0.18, -0.17, 18, color(0.5, 0.82, 1, 1));
             for (let i = 0; i < Math.min(orbit.photonPlayerNames.length, 3); i++) {
-                addText(orbit.root, "- " + orbit.photonPlayerNames[i], -0.16, -0.25 - i * 0.035, 18, color(0.85, 0.92, 1, 1));
+                addText(orbit.root, "- " + orbit.photonPlayerNames[i], -0.18, -0.205 - i * 0.026, 15, color(0.85, 0.92, 1, 1));
             }
         }
 
@@ -395,13 +396,29 @@
 
             const panel = primitive(3, "[Orbit Panel]");
             setParent(panel, root);
-            setLocal(panel, vec3(0, 0, 0), vec3(0.035, 0.43, 0.53), null);
-            setColor(panel, color(0.015, 0.016, 0.02, 0.96));
+            setLocal(panel, vec3(0, 0, 0), vec3(0.52, 0.39, 0.025), null);
+            setColor(panel, color(0.012, 0.012, 0.018, 1));
 
-            const trim = primitive(3, "[Orbit Trim]");
-            setParent(trim, root);
-            setLocal(trim, vec3(0.006, 0, 0), vec3(0.018, 0.46, 0.56), null);
-            setColor(trim, color(0.38, 0.22, 0.82, 1));
+            const borderColor = color(0.44, 0.2, 1, 1);
+            const top = primitive(3, "[Orbit Border Top]");
+            setParent(top, root);
+            setLocal(top, vec3(0, 0.205, -0.03), vec3(0.54, 0.018, 0.018), null);
+            setColor(top, borderColor);
+
+            const bottom = primitive(3, "[Orbit Border Bottom]");
+            setParent(bottom, root);
+            setLocal(bottom, vec3(0, -0.205, -0.03), vec3(0.54, 0.018, 0.018), null);
+            setColor(bottom, borderColor);
+
+            const left = primitive(3, "[Orbit Border Left]");
+            setParent(left, root);
+            setLocal(left, vec3(-0.27, 0, -0.03), vec3(0.018, 0.39, 0.018), null);
+            setColor(left, borderColor);
+
+            const right = primitive(3, "[Orbit Border Right]");
+            setParent(right, root);
+            setLocal(right, vec3(0.27, 0, -0.03), vec3(0.018, 0.39, 0.018), null);
+            setColor(right, borderColor);
 
             orbit.root = root;
             rebuildRows();
