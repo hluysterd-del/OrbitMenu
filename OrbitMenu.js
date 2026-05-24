@@ -9,17 +9,20 @@
 //  - OP mods from ii's menu reference
 // ====================================================================
 
+console.log("[Orbit] Script loaded, waiting 5s for game...");
 setTimeout(() => {
+console.log("[Orbit] Timer fired, calling Il2Cpp.perform...");
 Il2Cpp.perform(() => {
     console.log("[Orbit] ===== Orbit Menu V6.9 LOADING =====");
 
     // ---- Assemblies ----
-    const acImage     = Il2Cpp.domain.assembly("AnimalCompany").image;
-    const coreImage   = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
-    const physImage   = Il2Cpp.domain.assembly("UnityEngine.PhysicsModule").image;
-    const uiModImage  = Il2Cpp.domain.assembly("UnityEngine.UIModule").image;
-    const uiImage     = Il2Cpp.domain.assembly("UnityEngine.UI").image;
-    const textImage   = Il2Cpp.domain.assembly("UnityEngine.TextRenderingModule").image;
+    let acImage, coreImage, physImage, uiModImage, uiImage, textImage;
+    try { acImage     = Il2Cpp.domain.assembly("AnimalCompany").image; console.log("[Orbit] ✓ AnimalCompany"); } catch(e){ console.log("[Orbit] ✗ AnimalCompany: "+e); throw e; }
+    try { coreImage   = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image; console.log("[Orbit] ✓ CoreModule"); } catch(e){ console.log("[Orbit] ✗ CoreModule: "+e); throw e; }
+    try { physImage   = Il2Cpp.domain.assembly("UnityEngine.PhysicsModule").image; } catch(e){ console.log("[Orbit] ✗ PhysicsModule: "+e); throw e; }
+    try { uiModImage  = Il2Cpp.domain.assembly("UnityEngine.UIModule").image; } catch(e){ console.log("[Orbit] ✗ UIModule: "+e); throw e; }
+    try { uiImage     = Il2Cpp.domain.assembly("UnityEngine.UI").image; } catch(e){ console.log("[Orbit] ✗ UI: "+e); throw e; }
+    try { textImage   = Il2Cpp.domain.assembly("UnityEngine.TextRenderingModule").image; } catch(e){ console.log("[Orbit] ✗ TextRendering: "+e); throw e; }
 
     let inputImage = null;
     try { inputImage = Il2Cpp.domain.assembly("UnityEngine.InputLegacyModule").image; } catch(_){}
@@ -63,10 +66,12 @@ Il2Cpp.perform(() => {
     try { CursorClass = coreImage.class("UnityEngine.Cursor"); } catch(_){}
 
     // ---- AC Classes ----
-    const PlayerControllerClass  = acImage.class("AnimalCompany.PlayerController");
-    const GorillaLocomotionClass = acImage.class("AnimalCompany.GorillaLocomotion");
-    const XRInputManagerClass    = acImage.class("AnimalCompany.XRInputManager");
-    const NetPlayerClass         = acImage.class("AnimalCompany.NetPlayer");
+    let PlayerControllerClass, GorillaLocomotionClass, XRInputManagerClass, NetPlayerClass;
+    try { PlayerControllerClass  = acImage.class("AnimalCompany.PlayerController"); } catch(e){ console.log("[Orbit] ✗ PlayerController: "+e); throw e; }
+    try { GorillaLocomotionClass = acImage.class("AnimalCompany.GorillaLocomotion"); } catch(e){ console.log("[Orbit] ✗ GorillaLocomotion: "+e); throw e; }
+    try { XRInputManagerClass    = acImage.class("AnimalCompany.XRInputManager"); } catch(e){ console.log("[Orbit] ✗ XRInputManager: "+e); throw e; }
+    try { NetPlayerClass         = acImage.class("AnimalCompany.NetPlayer"); } catch(e){ console.log("[Orbit] ✗ NetPlayer: "+e); throw e; }
+    console.log("[Orbit] ✓ All AC classes loaded");
 
     let PrefabGenClass = null;
     try { PrefabGenClass = acImage.class("AnimalCompany.PrefabGenerator"); } catch(_){}
@@ -577,14 +582,6 @@ Il2Cpp.perform(() => {
     function initScreenOverlay() {
         if (O.screenInited) return;
         try {
-            // Create ScreenSpace Overlay canvas
-            const canvasGO = new Il2Cpp.Object(GameObjectClass.method(".ctor",1).invoke(Il2Cpp.string("[OrbitScreenCanvas]")));
-            // Actually use CreatePrimitive workaround then strip
-            const cGO = GameObjectClass.method(".ctor",1);
-        } catch(_){}
-
-        // Simpler approach: create a regular GO, add Canvas
-        try {
             const cGO = GameObjectClass.method("CreatePrimitive").invoke(3);
             cGO.method("set_name").invoke(Il2Cpp.string("[OrbitScreen]"));
             try{getComponent(cGO,RendererClass).method("set_enabled").invoke(false);}catch(_){}
@@ -1027,9 +1024,13 @@ Il2Cpp.perform(() => {
     //  HOOK
     // ================================================================
     if(!O.hookInstalled){
-        const tgt=GorillaLocomotionClass.tryMethod("OnUpdate")||GorillaLocomotionClass.tryMethod("FixedUpdate");
-        if(!tgt)log("ERROR: no update method");
-        else{Interceptor.attach(tgt.virtualAddress,{onEnter(){try{onTick();}catch(_){}}});O.hookInstalled=true;log("hook on GorillaLocomotion."+tgt.name);}
+        let tgt=null;
+        try { tgt=GorillaLocomotionClass.method("OnUpdate"); } catch(_){}
+        if(!tgt) try { tgt=GorillaLocomotionClass.method("FixedUpdate"); } catch(_){}
+        if(!tgt) try { tgt=GorillaLocomotionClass.method("Update"); } catch(_){}
+        if(!tgt) try { tgt=GorillaLocomotionClass.method("LateUpdate"); } catch(_){}
+        if(!tgt){log("ERROR: no update method found on GorillaLocomotion");}
+        else{Interceptor.attach(tgt.virtualAddress,{onEnter(){try{onTick();}catch(e){if(O.tick%600===0)log("tick err: "+e);}}});O.hookInstalled=true;log("hook on GorillaLocomotion."+tgt.name);}
     }
     log("===== Orbit Menu V6.9 READY =====");
 });
