@@ -115,11 +115,11 @@
         catch (_) { return null; }
     }
 
-    // ---- Create an empty GameObject (no CreatePrimitive — that crashes here)
+    // ---- Create an empty GameObject (avoid CreatePrimitive enum issue + .ctor invokeRaw)
     function newGameObject(name) {
-        const ctor = _u.GameObject.method(".ctor", 1);  // 1 arg ctor takes string name
-        const go = _u.GameObject.alloc();
-        ctor.invokeRaw(go.handle, Il2Cpp.string(name));
+        // klass.new() calls the parameterless ctor — much safer than invokeRaw on .ctor(string)
+        const go = _u.GameObject.new();
+        try { go.method("set_name").invoke(Il2Cpp.string(name)); } catch (_) {}
         return go;
     }
 
@@ -147,53 +147,54 @@
         }
         log("building menu (attempt 1)...");
 
+        // Stage-by-stage wrapper so we know exactly which call breaks.
+        function stage(label, fn) {
+            try {
+                log("  step: " + label);
+                return fn();
+            } catch (e) {
+                throw new Error("at step '" + label + "': " + (e && (e.message || e)));
+            }
+        }
+
         try {
             ensureClasses();
 
-            // Root GameObject — just a name + transform, no mesh
-            const root = newGameObject("OrbitRoot");
+            const root = stage("new GameObject(root)", () => newGameObject("OrbitRoot"));
+            const canvasGO = stage("new GameObject(canvas)", () => newGameObject("OrbitCanvas"));
+            stage("canvas.SetParent(root)", () => {
+                canvasGO.method("get_transform").invoke()
+                        .method("SetParent", 1).invoke(root.method("get_transform").invoke());
+            });
+            const canvas = stage("AddComponent<Canvas>", () => addComponent(canvasGO, _u.Canvas));
+            if (!canvas || canvas.handle.isNull()) throw new Error("AddComponent<Canvas> returned null");
+            stage("canvas.set_renderMode(WorldSpace)", () => {
+                canvas.method("set_renderMode").invoke(_u.RenderMode.WorldSpace);
+            });
+            if (_u.CanvasScaler) stage("AddComponent<CanvasScaler>", () => addComponent(canvasGO, _u.CanvasScaler));
+            stage("canvas.localScale(0.001)", () => {
+                canvasGO.method("get_transform").invoke().method("set_localScale").invoke(mkVec3(0.001, 0.001, 0.001));
+            });
 
-            // Canvas as a child GameObject
-            const canvasGO = newGameObject("OrbitCanvas");
-            const cT = canvasGO.method("get_transform").invoke();
-            cT.method("SetParent", 1).invoke(root.method("get_transform").invoke());
-            cT.method("set_localPosition").invoke(mkVec3(0, 0, 0));
+            const textGO = stage("new GameObject(text)", () => newGameObject("OrbitText"));
+            stage("text.SetParent(canvas)", () => {
+                textGO.method("get_transform").invoke()
+                      .method("SetParent", 1).invoke(canvasGO.method("get_transform").invoke());
+            });
+            const text = stage("AddComponent<Text>", () => addComponent(textGO, _u.Text));
+            if (!text || text.handle.isNull()) throw new Error("AddComponent<Text> returned null");
 
-            // Add Canvas component
-            const canvas = addComponent(canvasGO, _u.Canvas);
-            if (!canvas || canvas.handle.isNull()) throw new Error("Canvas addComponent returned null");
-            canvas.method("set_renderMode").invoke(_u.RenderMode.WorldSpace);
+            stage("text.set_text", () => text.method("set_text").invoke(Il2Cpp.string(renderMenuText())));
+            stage("text.set_color", () => text.method("set_color").invoke(mkColor(0.9, 0.7, 1.0, 1.0)));
+            stage("text.set_fontSize", () => text.method("set_fontSize").invoke(40));
+            stage("text.set_alignment", () => text.method("set_alignment").invoke(4));
 
-            // CanvasScaler (optional but normal)
-            if (_u.CanvasScaler) addComponent(canvasGO, _u.CanvasScaler);
-            if (_u.GraphicRaycaster) addComponent(canvasGO, _u.GraphicRaycaster);
-
-            // Scale the canvas way down (UI units are pixels by default; need small to be world-readable)
-            const ct = canvasGO.method("get_transform").invoke();
-            ct.method("set_localScale").invoke(mkVec3(0.001, 0.001, 0.001));
-
-            // Text GameObject
-            const textGO = newGameObject("OrbitText");
-            const tT = textGO.method("get_transform").invoke();
-            tT.method("SetParent", 1).invoke(canvasGO.method("get_transform").invoke());
-            tT.method("set_localPosition").invoke(mkVec3(0, 0, 0));
-
-            // Add Text component
-            const text = addComponent(textGO, _u.Text);
-            if (!text || text.handle.isNull()) throw new Error("Text addComponent returned null");
-
-            text.method("set_text").invoke(Il2Cpp.string(renderMenuText()));
-            text.method("set_color").invoke(mkColor(0.9, 0.7, 1.0, 1.0));        // light purple
-            text.method("set_fontSize").invoke(40);
-            text.method("set_alignment").invoke(4);   // MiddleCenter == 4 in TextAnchor enum
-
-            // Make the RectTransform big enough to hold the text
             try {
                 const rect = textGO.method("GetComponent", 1).inflate(_u.RectTransform).invoke();
                 if (rect && !rect.handle.isNull()) {
                     rect.method("set_sizeDelta").invoke(mkVec2(800, 400));
                 }
-            } catch (_) {}
+            } catch (e) { log("  rect sizeDelta skipped: " + e); }
 
             orbit.rootHandle   = root.handle.toString();
             orbit.canvasHandle = canvasGO.handle.toString();
