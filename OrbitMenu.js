@@ -6,7 +6,7 @@
 (function () {
     "use strict";
 
-    const VERSION = "4.2";
+    const VERSION = "4.3";
     const LOG_TICKS = 300;
     const PHOTON_SCAN_TICKS = 120;
     const INPUT_REPEAT_TICKS = 14;
@@ -34,6 +34,8 @@
         U.GameObject = core.class("UnityEngine.GameObject");
         U.Object = core.class("UnityEngine.Object");
         U.Renderer = core.class("UnityEngine.Renderer");
+        U.Material = core.class("UnityEngine.Material");
+        U.Shader = core.class("UnityEngine.Shader");
         U.Vector3 = core.class("UnityEngine.Vector3");
         U.Color = core.class("UnityEngine.Color");
         U.Quaternion = core.class("UnityEngine.Quaternion");
@@ -81,6 +83,7 @@
             lastPhotonScan: -999999,
             lastLog: 0,
             lastVisiblePosition: "",
+            sharedMaterial: null,
         });
 
         function vec3(x, y, z) {
@@ -134,6 +137,22 @@
                 const r = renderer(go);
                 if (!r || r.handle.isNull()) return;
                 const mat = r.method("get_material").invoke();
+                const shaderNames = [
+                    "Universal Render Pipeline/Lit",
+                    "Universal Render Pipeline/Unlit",
+                    "Unlit/Color",
+                    "Standard",
+                    "Sprites/Default",
+                ];
+                for (let i = 0; i < shaderNames.length; i++) {
+                    try {
+                        const shader = U.Shader.method("Find").invoke(Il2Cpp.string(shaderNames[i]));
+                        if (shader && !shader.handle.isNull()) {
+                            mat.method("set_shader").invoke(shader);
+                            break;
+                        }
+                    } catch (_) {}
+                }
                 mat.method("set_color").invoke(col);
             } catch (_) {}
         }
@@ -232,6 +251,17 @@
                 if (cam && !cam.handle.isNull()) return cam.method("get_transform").invoke();
             } catch (_) {}
             return null;
+        }
+
+        function getMenuHandTransform() {
+            const player = getPlayer();
+            if (!player) return null;
+            return fieldObject(player, "handTransformRight") ||
+                fieldObject(player, "_handTransformRight") ||
+                fieldObject(player, "rightHandController") ||
+                fieldObject(player, "_rightHandController") ||
+                fieldObject(player, "handTransformLeft") ||
+                fieldObject(player, "_handTransformLeft");
         }
 
         function callMethod(target, methodName) {
@@ -428,17 +458,36 @@
 
         function placeMenu() {
             if (!orbit.root) return;
-            const head = getHeadTransform();
-            if (!head) return;
+            const hand = getMenuHandTransform();
+            const fallbackHead = hand ? null : getHeadTransform();
+            const anchor = hand || fallbackHead;
+            if (!anchor) return;
             try {
-                const hp = head.method("get_position").invoke();
-                const hf = head.method("get_forward").invoke();
                 const t = orbit.root.method("get_transform").invoke();
+                if (hand) {
+                    const hp = hand.method("get_position").invoke();
+                    t.method("set_position").invoke(hp);
+                    try {
+                        const q = hand.method("get_rotation").invoke();
+                        const e = q.method("get_eulerAngles").invoke();
+                        const ex = e.field("x").value;
+                        const ey = e.field("y").value;
+                        const ez = e.field("z").value + 180;
+                        t.method("set_rotation").invoke(euler(ex, ey, ez));
+                    } catch (_) {
+                        try { t.method("set_rotation").invoke(hand.method("get_rotation").invoke()); } catch (_) {}
+                    }
+                    orbit.lastVisiblePosition = "hand";
+                    return;
+                }
+
+                const hp = fallbackHead.method("get_position").invoke();
+                const hf = fallbackHead.method("get_forward").invoke();
                 const x = hp.field("x").value + hf.field("x").value * MENU_DISTANCE;
                 const y = hp.field("y").value + hf.field("y").value * MENU_DISTANCE - MENU_DOWN;
                 const z = hp.field("z").value + hf.field("z").value * MENU_DISTANCE;
                 t.method("set_position").invoke(vec3(x, y, z));
-                try { t.method("set_rotation").invoke(head.method("get_rotation").invoke()); } catch (_) {}
+                try { t.method("set_rotation").invoke(fallbackHead.method("get_rotation").invoke()); } catch (_) {}
                 orbit.lastVisiblePosition = x.toFixed(2) + "," + y.toFixed(2) + "," + z.toFixed(2);
             } catch (e) {
                 log("placeMenu failed: " + safeString(e));
