@@ -125,10 +125,9 @@
 
     // ---- Add a component by type ------------------------------------------
     function addComponent(gameObject, cls) {
-        // GameObject has an AddComponent(Type) overload.
+        // AddComponent(Type) is an INSTANCE method — invoke on the GameObject instance, not the class.
         try {
-            const m = _u.GameObject.method("AddComponent", 1);
-            return m.invoke(cls.type.object);
+            return gameObject.method("AddComponent", 1).invoke(cls.type.object);
         } catch (e) {
             log("addComponent " + cls.name + " err: " + e);
             return null;
