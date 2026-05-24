@@ -1,11 +1,12 @@
 // ====================================================================
-//  Orbit Menu V6.6 — Animal Company
-//  Fixes: prefab scan by GO names, pink platforms, joystick fly,
-//         item gun reticle, item orbit (RPG ammo).
+//  Orbit Menu V6.7 — Animal Company
+//  Fixes: per-class prefab scan (no more GameObject crash),
+//         Object.Instantiate for prefab spawning,
+//         Il2Cpp.gc.choose fallback for item discovery.
 // ====================================================================
 
 Il2Cpp.perform(() => {
-    console.log("[Orbit] ===== Orbit Menu V6.6 LOADING =====");
+    console.log("[Orbit] ===== Orbit Menu V6.7 LOADING =====");
 
     const acImage    = Il2Cpp.domain.assembly("AnimalCompany").image;
     const coreImage  = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
@@ -15,6 +16,7 @@ Il2Cpp.perform(() => {
 
     const GameObjectClass    = coreImage.class("UnityEngine.GameObject");
     const ObjectClass        = coreImage.class("UnityEngine.Object");
+    const TransformClass     = coreImage.class("UnityEngine.Transform");
     const RendererClass      = coreImage.class("UnityEngine.Renderer");
     const ResourcesClass     = coreImage.class("UnityEngine.Resources");
     const CanvasClass        = uiModImage.class("UnityEngine.Canvas");
@@ -31,6 +33,41 @@ Il2Cpp.perform(() => {
     try { PrefabGeneratorClass = acImage.class("AnimalCompany.PrefabGenerator"); } catch(_) {}
     let GrabbableItemPrefabClass = null;
     try { GrabbableItemPrefabClass = acImage.class("AnimalCompany.GrabbableItemPrefab"); } catch(_) {}
+
+    // ================================================================
+    //  PREFAB COMPONENT CLASSES — scan these instead of GameObject
+    //  FindObjectsOfType works for specific AC classes (proven with NetPlayer)
+    //  but crashes for GameObject/GrabbableItemPrefab (too many instances)
+    // ================================================================
+    const PREFAB_CLASS_NAMES = [
+        "AnimalCompany.ItemSellingMachineController",
+        "AnimalCompany.DuplicationMachine",
+        "AnimalCompany.ClawMachine",
+        "AnimalCompany.TeleportationMachine",
+        "AnimalCompany.PortableTeleportationMachine",
+        "AnimalCompany.ItemVendingMachine",
+        "AnimalCompany.SpawnableExplosiveObject",
+        "AnimalCompany.SpawnableZipline",
+        "AnimalCompany.BonfireController",
+        "AnimalCompany.AnglerController",
+        "AnimalCompany.WorldInteractable",
+        "AnimalCompany.LockedShippingContainer",
+        "AnimalCompany.GrabbableObject",
+        "AnimalCompany.ArenaGameManager",
+        "AnimalCompany.CarController",
+    ];
+
+    const prefabClasses = {};
+    for (const name of PREFAB_CLASS_NAMES) {
+        try {
+            prefabClasses[name] = acImage.class(name);
+        } catch(_) {
+            // Class doesn't exist in this build — skip
+        }
+    }
+    log_early("Loaded " + Object.keys(prefabClasses).length + "/" + PREFAB_CLASS_NAMES.length + " prefab classes");
+
+    function log_early(m) { console.log("[Orbit] " + m); }
 
     // ---- state ----
     globalThis.orbit = {
@@ -51,12 +88,12 @@ Il2Cpp.perform(() => {
 
         // prefab orbit
         prefabOrbitOn: false,
-        prefabOrbitName: "",
+        prefabOrbitIdx: -1,
         prefabOrbitObjs: [],
         prefabOrbitAngle: 0,
 
         // runtime discovery
-        prefabNames: null,      // [string] — GO names for prefab tab
+        prefabEntries: null,    // [{name, go, className}] — discovered scene prefabs
         prefabDiscovered: false,
         itemList: null,         // [string] — item IDs for item gun
         itemsDiscovered: false,
@@ -171,85 +208,126 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  PREFAB DISCOVERY — scan GameObject names (like ACCompanion)
+    //  PREFAB DISCOVERY — per-class component scan
+    //  FindObjectsOfType(GameObjectClass) crashes (access violation 0x135)
+    //  but works perfectly for specific AC classes (proven: NetPlayer).
+    //  Strategy: scan each AC component class, get its GO, store ref for
+    //  Object.Instantiate-based spawning.
     // ================================================================
-    const KNOWN_PREFABS = [
-        "BigBanana","BonfireController","ClawMachineNetObject","Duplicator",
-        "ExplosiveEgg","FishingRod","GhostLightController","GiftBoxItem",
-        "GoldenNut","GravitySwitcher","LaunchPad","MoneyBag","NutCannon",
-        "PaintBucket","RadioItem","RocketLauncher","SellMachine","Shield",
-        "Skateboard","Snowball","SpeedBoots","Trampoline","Umbrella",
-        "WaterBalloon","Wrench","BoomBox","Flashlight","Magnet",
-        "Parachute","Jetpack","GrappleHook","FreezeRay","ShrinkRay",
-        "GrowthRay","PortalGun","TNT","Dynamite","Firework",
-        "AnglerController","BlobfishController","CrabController",
-        "FrogController","SpiderController","BatController",
-        "SnakeController","BeeController","SlimeController",
-        "GhostController","RatController","WolfController",
-        "CarController","DoorController","LightController",
-        "FogController","ArenaGameManager","ItemSelling",
-        "AutoReloadGun",
-    ];
 
-    // Names to skip (internal/boring objects)
-    function isBoringName(n) {
-        if (!n || n.length < 2) return true;
-        if (n.startsWith("[Orbit")) return true;
-        if (n.startsWith("__")) return true;
-        const low = n.toLowerCase();
-        if (low === "main camera" || low === "directional light") return true;
-        if (low === "eventsystem" || low === "postprocessvolume") return true;
-        if (low.startsWith("ui_") || low.startsWith("fx_")) return true;
-        return false;
+    function getGameObjectName(component) {
+        // Component → get_gameObject() → get_name()
+        try {
+            const go = component.method("get_gameObject").invoke();
+            if (go && !go.handle.isNull()) {
+                const n = go.method("get_name").invoke();
+                return n ? n.toString() : null;
+            }
+        } catch(_) {}
+        // Try get_transform → get_gameObject → get_name
+        try {
+            const tf = component.method("get_transform").invoke();
+            if (tf && !tf.handle.isNull()) {
+                const go = tf.method("get_gameObject").invoke();
+                if (go && !go.handle.isNull()) {
+                    const n = go.method("get_name").invoke();
+                    return n ? n.toString() : null;
+                }
+            }
+        } catch(_) {}
+        return null;
+    }
+
+    function getGameObject(component) {
+        try {
+            const go = component.method("get_gameObject").invoke();
+            if (go && !go.handle.isNull()) return go;
+        } catch(_) {}
+        try {
+            const tf = component.method("get_transform").invoke();
+            if (tf && !tf.handle.isNull()) {
+                const go = tf.method("get_gameObject").invoke();
+                if (go && !go.handle.isNull()) return go;
+            }
+        } catch(_) {}
+        return null;
     }
 
     function discoverGamePrefabs() {
         if (O.prefabDiscovered) return;
         O.prefabDiscovered = true;
 
-        const names = {};
+        const entries = [];     // {name, go, className}
+        const seenNames = {};
 
-        // Approach 1: FindObjectsOfType(GameObject) — active scene objects
-        try {
-            const arr = ObjectClass.method("FindObjectsOfType",1).invoke(GameObjectClass.type);
-            if (arr) {
-                const lim = Math.min(arr.length, 500);
-                log("Scan1: " + arr.length + " active GOs (reading " + lim + ")");
+        // Scan each specific AC component class
+        for (const [className, cls] of Object.entries(prefabClasses)) {
+            try {
+                const arr = ObjectClass.method("FindObjectsOfType",1).invoke(cls.type);
+                if (!arr) { log("  " + className.split(".").pop() + ": null"); continue; }
+
+                const count = arr.length;
+                let found = 0;
+                const lim = Math.min(count, 50); // cap per-class
                 for (let i = 0; i < lim; i++) {
                     try {
-                        const go = arr.get(i);
-                        if (!go || go.handle.isNull()) continue;
-                        const n = go.method("get_name").invoke().toString();
-                        if (!isBoringName(n)) names[n] = true;
-                    } catch(_){}
+                        const comp = arr.get(i);
+                        if (!comp || comp.handle.isNull()) continue;
+                        const name = getGameObjectName(comp);
+                        if (!name || name.length < 2) continue;
+                        if (name.startsWith("[Orbit")) continue;
+
+                        // Deduplicate by name — keep first instance
+                        const key = name;
+                        if (seenNames[key]) continue;
+                        seenNames[key] = true;
+
+                        const go = getGameObject(comp);
+                        if (!go) continue;
+
+                        entries.push({
+                            name: name,
+                            go: go,
+                            className: className.split(".").pop()
+                        });
+                        found++;
+                    } catch(_) {}
                 }
+                if (count > 0) log("  " + className.split(".").pop() + ": " + count + " instances, " + found + " unique GOs");
+            } catch(e) {
+                log("  " + className.split(".").pop() + " scan err: " + e);
             }
-        } catch(e) { log("scan1 err: "+e); }
+        }
 
-        // Approach 2: FindObjectsOfTypeAll(GameObject) — ALL loaded including prefab assets
-        try {
-            const arr = ResourcesClass.method("FindObjectsOfTypeAll",1).invoke(GameObjectClass.type);
-            if (arr) {
-                const lim = Math.min(arr.length, 500);
-                log("Scan2: " + arr.length + " total GOs (reading " + lim + ")");
-                for (let i = 0; i < lim; i++) {
-                    try {
-                        const go = arr.get(i);
-                        if (!go || go.handle.isNull()) continue;
-                        const n = go.method("get_name").invoke().toString();
-                        if (!isBoringName(n)) names[n] = true;
-                    } catch(_){}
-                }
+        // Also try GetItemPrefab for known machine-type names
+        if (PrefabGeneratorClass) {
+            const knownMachines = [
+                "SellMachine", "Duplicator", "ClawMachineNetObject",
+                "TeleportationMachine", "ItemVendingMachine",
+                "BonfireController", "AnglerController",
+                "ExplosiveEgg", "LaunchPad", "Trampoline",
+                "GravitySwitcher", "SpeedBoots", "Shield",
+            ];
+            for (const name of knownMachines) {
+                if (seenNames[name]) continue;
+                try {
+                    const prefab = PrefabGeneratorClass.method("GetItemPrefab").invoke(Il2Cpp.string(name));
+                    if (prefab && !prefab.handle.isNull()) {
+                        seenNames[name] = true;
+                        entries.push({ name: name, go: prefab, className: "GetItemPrefab" });
+                        log("  GetItemPrefab('" + name + "') = OK");
+                    }
+                } catch(_) {}
             }
-        } catch(e) { log("scan2 err: "+e); }
+        }
 
-        // Approach 3: Known prefab names (guaranteed useful)
-        for (const n of KNOWN_PREFABS) names[n] = true;
-
-        const sorted = Object.keys(names).sort();
-        O.prefabNames = sorted;
-        log("Prefab scan done: " + sorted.length + " unique names");
-        log("First 20: " + sorted.slice(0,20).join(", "));
+        // Sort by name
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+        O.prefabEntries = entries;
+        log("Prefab scan done: " + entries.length + " unique prefabs");
+        if (entries.length > 0) {
+            log("First 15: " + entries.slice(0, 15).map(e => e.name + " (" + e.className + ")").join(", "));
+        }
     }
 
     // ================================================================
@@ -268,6 +346,28 @@ Il2Cpp.perform(() => {
         if (O.itemsDiscovered) return;
         O.itemsDiscovered = true;
         if (!GrabbableItemPrefabClass) return;
+
+        // Approach 1: Il2Cpp.gc.choose — walks the GC heap safely
+        try {
+            const ids = [], seen = {};
+            Il2Cpp.gc.choose(GrabbableItemPrefabClass).forEach(obj => {
+                try {
+                    if (!obj || obj.handle.isNull()) return;
+                    const raw = obj.method("get_itemID").invoke();
+                    if (!raw) return;
+                    const id = raw.toString();
+                    if (id && id.length > 0 && !seen[id]) { seen[id] = true; ids.push(id); }
+                } catch(_) {}
+            });
+            if (ids.length > 0) {
+                ids.sort();
+                O.itemList = ids;
+                log("gc.choose discovered " + ids.length + " item IDs");
+                return;
+            }
+        } catch(e) { log("gc.choose items err: " + e); }
+
+        // Approach 2: FindObjectsOfTypeAll (may crash — wrapped in try)
         try {
             const all = ResourcesClass.method("FindObjectsOfTypeAll",1).invoke(GrabbableItemPrefabClass.type);
             if (!all) return;
@@ -283,22 +383,27 @@ Il2Cpp.perform(() => {
                 } catch(_) {}
             }
             ids.sort();
-            if (ids.length > 0) { O.itemList = ids; log("Discovered " + ids.length + " item IDs"); }
-        } catch(e) { log("discoverItems err: " + e); }
+            if (ids.length > 0) { O.itemList = ids; log("Discovered " + ids.length + " item IDs via FindAll"); }
+        } catch(e) { log("discoverItems FindAll err: " + e); }
     }
 
     function getItemList() { return O.itemList || FALLBACK_ITEMS; }
-    function getPrefabNames() { return O.prefabNames || KNOWN_PREFABS; }
+    function getPrefabEntries() { return O.prefabEntries || []; }
 
     // ================================================================
-    //  SPAWN — all via PrefabGenerator.SpawnItem (name string)
+    //  SPAWN — two paths:
+    //  1) spawnByName(itemID) for item_xxx via PrefabGenerator.SpawnItem
+    //  2) spawnPrefabClone(entry) via Object.Instantiate for scene objects
     // ================================================================
+
+    // Path 1: PrefabGenerator.SpawnItem — only works for item_xxx IDs
     function spawnByName(name, x, y, z) {
         if (!PrefabGeneratorClass) return null;
         const s = Il2Cpp.string(name);
 
         // Try static SpawnItem(string, Vec3, Quat, Transform)
         try {
+            const NULL = Il2Cpp.object(ptr(0));
             const obj = PrefabGeneratorClass.method("SpawnItem",4).invoke(s, [x,y,z], [0,0,0,1], NULL);
             if (obj && !obj.handle.isNull()) return obj;
         } catch(_) {}
@@ -307,6 +412,7 @@ Il2Cpp.perform(() => {
         try {
             const pg = ObjectClass.method("FindObjectOfType",1).invoke(PrefabGeneratorClass.type);
             if (pg && !pg.handle.isNull()) {
+                const NULL = Il2Cpp.object(ptr(0));
                 const obj = PrefabGeneratorClass.method("SpawnItem",4).on(pg).invoke(s, [x,y,z], [0,0,0,1], NULL);
                 if (obj && !obj.handle.isNull()) return obj;
             }
@@ -315,13 +421,66 @@ Il2Cpp.perform(() => {
         // Try SpawnItem with fewer params
         try { return PrefabGeneratorClass.method("SpawnItem",1).invoke(s); } catch(_) {}
 
-        // Try GeneratePrefab
-        try { PrefabGeneratorClass.method("GeneratePrefab",4).invoke(s, [x,y,z], [0,0,0,1], false); return true; } catch(_) {}
-
         return null;
     }
 
-    function spawnInFront(name) {
+    // Path 2: Object.Instantiate — clone a scene object and reposition
+    function spawnPrefabClone(entry, x, y, z) {
+        if (!entry || !entry.go) return null;
+        const sourceGO = entry.go;
+
+        // Try Instantiate(Object) — 1 param
+        let clone = null;
+        try {
+            clone = ObjectClass.method("Instantiate",1).invoke(sourceGO);
+        } catch(e) {
+            log("Instantiate(1) err: " + e);
+        }
+
+        // Fallback: Instantiate(Object, Vector3, Quaternion) — 3 params
+        if (!clone || clone.handle.isNull()) {
+            try {
+                clone = ObjectClass.method("Instantiate",3).invoke(sourceGO, [x,y,z], [0,0,0,1]);
+            } catch(e) {
+                log("Instantiate(3) err: " + e);
+            }
+        }
+
+        if (!clone || clone.handle.isNull()) {
+            log("Instantiate failed for " + entry.name);
+            return null;
+        }
+
+        // Set position
+        try {
+            const tf = clone.method("get_transform").invoke();
+            if (tf && !tf.handle.isNull()) {
+                tf.method("set_position").invoke([x, y, z]);
+            }
+        } catch(e) { log("set_position: " + e); }
+
+        // Activate (clone might be inactive)
+        try { clone.method("SetActive").invoke(true); } catch(_) {}
+
+        return clone;
+    }
+
+    function spawnPrefabInFront(entry) {
+        const head = headTf();
+        const pos = readPos(head);
+        const fwd = readFwd(head);
+        if (!pos || !fwd) { flashAction("no head"); return; }
+        const d = 3;
+        const x = pos.x + fwd.x * d;
+        const y = pos.y + fwd.y * d;
+        const z = pos.z + fwd.z * d;
+
+        const obj = spawnPrefabClone(entry, x, y, z);
+        if (obj) flashAction("Spawned " + entry.name);
+        else flashAction("spawn fail: " + entry.name);
+    }
+
+    function spawnItemInFront(name) {
         const head = headTf();
         const pos = readPos(head);
         const fwd = readFwd(head);
@@ -432,11 +591,14 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  PREFAB ORBIT — spawn 5 of any prefab, orbit around player
+    //  PREFAB ORBIT — spawn 5 clones of a scene prefab, orbit player
     // ================================================================
-    function startPrefabOrbit(name) {
+    function startPrefabOrbit(idx) {
         stopPrefabOrbit();
-        O.prefabOrbitName = name;
+        const entries = getPrefabEntries();
+        if (idx < 0 || idx >= entries.length) { flashAction("invalid prefab"); return false; }
+        const entry = entries[idx];
+        O.prefabOrbitIdx = idx;
         const pos = readPos(headTf());
         if (!pos) { flashAction("no head"); return false; }
 
@@ -445,8 +607,8 @@ Il2Cpp.perform(() => {
             const angle = (2 * Math.PI / 5) * i;
             const sx = pos.x + Math.cos(angle) * 3;
             const sz = pos.z + Math.sin(angle) * 3;
-            const obj = spawnByName(name, sx, pos.y + 0.5, sz);
-            if (obj && obj !== true && !obj.handle.isNull()) {
+            const obj = spawnPrefabClone(entry, sx, pos.y + 0.5, sz);
+            if (obj && !obj.handle.isNull()) {
                 try { ObjectClass.method("DontDestroyOnLoad").invoke(obj); } catch(_){}
                 spawned.push(obj);
             }
@@ -455,7 +617,7 @@ Il2Cpp.perform(() => {
         O.prefabOrbitObjs = spawned;
         O.prefabOrbitOn = true;
         O.prefabOrbitAngle = 0;
-        flashAction(spawned.length + "x " + name + " orbiting!");
+        flashAction(spawned.length + "x " + entry.name + " orbiting!");
         return true;
     }
 
@@ -465,7 +627,7 @@ Il2Cpp.perform(() => {
         }
         O.prefabOrbitObjs = [];
         O.prefabOrbitOn = false;
-        O.prefabOrbitName = "";
+        O.prefabOrbitIdx = -1;
     }
 
     function tickPrefabOrbit() {
@@ -536,7 +698,7 @@ Il2Cpp.perform(() => {
     }
 
     function buildPrefabPage() {
-        const list = getPrefabNames();
+        const list = getPrefabEntries();
         const totalPages = Math.max(1, Math.ceil(list.length / PER_PAGE));
         const page = Math.min(O.prefabPage, totalPages - 1);
         const start = page * PER_PAGE;
@@ -553,12 +715,18 @@ Il2Cpp.perform(() => {
 
         // Rescan button
         its.push({l:"<color=#aaaaaa>Rescan</color>", t:"act", fn:()=>{
-            O.prefabDiscovered=false; discoverGamePrefabs(); flashAction("Rescanned!");
+            O.prefabDiscovered=false; discoverGamePrefabs();
+            flashAction("Rescanned: " + getPrefabEntries().length + " prefabs");
         }});
 
+        if (list.length === 0) {
+            its.push({l:"<color=#ff4444>No prefabs found</color>", t:"act", fn:()=>{flashAction("try Rescan");}});
+        }
+
         for (let i = start; i < end; i++) {
-            const name = list[i];
-            its.push({l:name, t:"act", fn:()=>spawnInFront(name)});
+            const entry = list[i];
+            const label = entry.name + " <color=#888888>(" + entry.className + ")</color>";
+            its.push({l:label, t:"act", fn:(function(e){ return function(){ spawnPrefabInFront(e); }; })(entry)});
         }
         if (page > 0) its.push({l:"◀ Prev Page", t:"act", fn:()=>{O.prefabPage--;O.cursor=3;}});
         if (end < list.length) its.push({l:"Next Page ▶", t:"act", fn:()=>{O.prefabPage++;O.cursor=3;}});
@@ -566,18 +734,24 @@ Il2Cpp.perform(() => {
     }
 
     function buildOrbitPickPage() {
-        const list = getPrefabNames();
+        const list = getPrefabEntries();
         const totalPages = Math.max(1, Math.ceil(list.length / PER_PAGE));
         const page = Math.min(O.prefabPage, totalPages - 1);
         const start = page * PER_PAGE;
         const end = Math.min(start + PER_PAGE, list.length);
 
         const its = [{l:"< Back", t:"act", fn:()=>{O.tab="prefabs";O.cursor=0;O.prefabPage=0;}}];
+
+        if (list.length === 0) {
+            its.push({l:"<color=#ff4444>No prefabs to orbit</color>", t:"act", fn:()=>{}});
+        }
+
         for (let i = start; i < end; i++) {
-            const name = list[i];
-            its.push({l:name, t:"act", fn:()=>{
-                if (startPrefabOrbit(name)) { O.tab = "prefabs"; O.cursor = 0; O.prefabPage = 0; }
-            }});
+            const entry = list[i];
+            const idx = i;
+            its.push({l:entry.name, t:"act", fn:(function(ii){ return function(){
+                if (startPrefabOrbit(ii)) { O.tab = "prefabs"; O.cursor = 0; O.prefabPage = 0; }
+            }; })(idx)});
         }
         if (page > 0) its.push({l:"◀ Prev", t:"act", fn:()=>{O.prefabPage--;O.cursor=1;}});
         if (end < list.length) its.push({l:"Next ▶", t:"act", fn:()=>{O.prefabPage++;O.cursor=1;}});
@@ -600,7 +774,7 @@ Il2Cpp.perform(() => {
         const L = ["<color=#bb88ff>Orbit Menu" + tabTitle() + "</color>"];
 
         if (O.tab === "prefabs" || O.tab === "prefab_orbit_pick") {
-            const list = getPrefabNames();
+            const list = getPrefabEntries();
             const totalPages = Math.max(1, Math.ceil(list.length / PER_PAGE));
             L.push("<color=#aaaaaa>Page "+(O.prefabPage+1)+"/"+totalPages+" ("+list.length+" prefabs)</color>");
         }
@@ -621,7 +795,11 @@ Il2Cpp.perform(() => {
         }
         L.push("");
         if (O.actionMsg && (O.tick - O.actionTick) < 180) L.push("<color=#00ffaa>"+O.actionMsg+"</color>");
-        if (O.prefabOrbitOn) L.push("<color=#55ccff>P-Orbit: "+O.prefabOrbitName+" x"+O.prefabOrbitObjs.length+"</color>");
+        if (O.prefabOrbitOn) {
+            const pName = O.prefabOrbitIdx >= 0 && O.prefabOrbitIdx < getPrefabEntries().length
+                ? getPrefabEntries()[O.prefabOrbitIdx].name : "?";
+            L.push("<color=#55ccff>P-Orbit: "+pName+" x"+O.prefabOrbitObjs.length+"</color>");
+        }
         if (O.itemOrbitOn) L.push("<color=#ffcc00>I-Orbit: RPG ammo x"+O.itemOrbitObjs.length+"</color>");
         L.push("<color=#888888>L-Stick=fly  R-Stick=nav  B/Trigger=sel</color>");
         return L.join("\n");
@@ -880,7 +1058,7 @@ Il2Cpp.perform(() => {
             discoverGamePrefabs();
             discoverItems();
 
-            log("MENU BUILT — prefabs=" + getPrefabNames().length + " items=" + getItemList().length);
+            log("MENU BUILT — prefabs=" + getPrefabEntries().length + " items=" + getItemList().length);
             setText(render());
         }catch(e){O.buildFailed=true;log("BUILD FAILED: "+(e.stack||e.message||e));}
     }
@@ -905,7 +1083,7 @@ Il2Cpp.perform(() => {
         if(O.tick-O.lastLog>=300){O.lastLog=O.tick;
             log("t="+O.tick+" tab="+O.tab+" fly="+O.flyOn+" plat="+O.platformsOn+
                 " orb="+O.orbitAllOn+" iOrb="+O.itemOrbitOn+" pOrb="+O.prefabOrbitOn+
-                " gun="+O.itemGunOn+" prefabs="+getPrefabNames().length);
+                " gun="+O.itemGunOn+" prefabs="+getPrefabEntries().length);
         }
     }
 
@@ -917,5 +1095,5 @@ Il2Cpp.perform(() => {
         if(!tgt)log("ERROR: no update method");
         else{Interceptor.attach(tgt.virtualAddress,{onEnter(){try{onTick();}catch(_){}}});O.hookInstalled=true;log("hook on GorillaLocomotion."+tgt.name);}
     }
-    log("===== Orbit Menu V6.6 READY =====");
+    log("===== Orbit Menu V6.7 READY =====");
 });
