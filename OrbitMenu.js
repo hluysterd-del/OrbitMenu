@@ -1,12 +1,12 @@
 // ====================================================================
 //  Orbit Menu - Animal Company
-//  Lunar-style cube menu shell. Y toggles the panel, left stick moves, B selects.
+//  Lunar-style hand GUI shell. Y toggles the panel, right hand points, B selects.
 // ====================================================================
 
 (function () {
     "use strict";
 
-    const VERSION = "4.3";
+    const VERSION = "4.4";
     const LOG_TICKS = 300;
     const PHOTON_SCAN_TICKS = 120;
     const INPUT_REPEAT_TICKS = 14;
@@ -71,11 +71,13 @@
             root: null,
             rows: [],
             labels: [],
+            pointer: null,
             visible: true,
             cursor: 0,
             page: "main",
             lastToggleDown: false,
             lastSelectDown: false,
+            lastTouchTick: -999999,
             lastMoveTick: -999999,
             lastRenderKey: "",
             photonStatus: "Photon: waiting",
@@ -140,7 +142,10 @@
                 const shaderNames = [
                     "Universal Render Pipeline/Lit",
                     "Universal Render Pipeline/Unlit",
+                    "Hidden/Internal-Colored",
+                    "GUI/Text Shader",
                     "Unlit/Color",
+                    "Legacy Shaders/Transparent/Diffuse",
                     "Standard",
                     "Sprites/Default",
                 ];
@@ -172,7 +177,7 @@
             try { tm.method("set_color").invoke(col); } catch (_) {}
             try { tm.method("set_anchor").invoke(3); } catch (_) {}
             try { tm.method("set_alignment").invoke(0); } catch (_) {}
-            setLocal(go, vec3(x, y, -0.055), vec3(0.011, 0.011, 0.011), euler(0, 180, 0));
+            setLocal(go, vec3(x, y, -0.018), vec3(0.009, 0.009, 0.009), euler(0, 180, 0));
             orbit.labels.push({ go: go, text: tm });
             return tm;
         }
@@ -256,12 +261,21 @@
         function getMenuHandTransform() {
             const player = getPlayer();
             if (!player) return null;
+            return fieldObject(player, "handTransformLeft") ||
+                fieldObject(player, "_handTransformLeft") ||
+                fieldObject(player, "leftHandController") ||
+                fieldObject(player, "_leftHandController") ||
+                fieldObject(player, "handTransformRight") ||
+                fieldObject(player, "_handTransformRight");
+        }
+
+        function getPointerHandTransform() {
+            const player = getPlayer();
+            if (!player) return null;
             return fieldObject(player, "handTransformRight") ||
                 fieldObject(player, "_handTransformRight") ||
                 fieldObject(player, "rightHandController") ||
-                fieldObject(player, "_rightHandController") ||
-                fieldObject(player, "handTransformLeft") ||
-                fieldObject(player, "_handTransformLeft");
+                fieldObject(player, "_rightHandController");
         }
 
         function callMethod(target, methodName) {
@@ -395,26 +409,21 @@
             destroyRows();
             refreshPhotonPlayers();
 
-            addText(orbit.root, "ORBIT V" + VERSION, -0.18, 0.15, 34, color(0.74, 0.53, 1, 1));
-            addText(orbit.root, orbit.page === "main" ? "LUNAR STYLE TABS" : orbit.page.toUpperCase(), -0.18, 0.115, 20, color(0.65, 0.65, 0.7, 1));
+            addText(orbit.root, "ORBIT V" + VERSION, -0.145, 0.105, 28, color(0.74, 0.53, 1, 1));
+            addText(orbit.root, orbit.page === "main" ? "LUNAR STYLE TABS" : orbit.page.toUpperCase(), -0.145, 0.078, 17, color(0.65, 0.65, 0.7, 1));
             const items = currentItems();
             clampCursor();
 
-            const startY = 0.06;
+            const startY = 0.035;
             for (let i = 0; i < items.length; i++) {
                 const item = items[i];
-                const y = startY - i * 0.06;
-                const row = primitive(3, "[Orbit Button] " + item.label);
-                setParent(row, orbit.root);
-                setLocal(row, vec3(0, y, -0.035), vec3(0.42, 0.042, 0.018), null);
-                setColor(row, rowColor(item, i === orbit.cursor));
-                orbit.rows.push(row);
-                addText(orbit.root, (i === orbit.cursor ? "> " : "  ") + item.label + (item.locked ? "  locked" : ""), -0.185, y - 0.013, 26, item.type === "back" ? color(1, 0.2, 0.2, 1) : color(1, 1, 1, 1));
+                const y = startY - i * 0.042;
+                addText(orbit.root, (i === orbit.cursor ? "> " : "  ") + "[ " + item.label + " ]" + (item.locked ? "  locked" : ""), -0.145, y - 0.01, 22, item.type === "back" ? color(1, 0.2, 0.2, 1) : (i === orbit.cursor ? color(1, 0.84, 0.1, 1) : color(1, 1, 1, 1)));
             }
 
-            addText(orbit.root, orbit.photonStatus, -0.18, -0.17, 18, color(0.5, 0.82, 1, 1));
+            addText(orbit.root, orbit.photonStatus, -0.145, -0.13, 14, color(0.5, 0.82, 1, 1));
             for (let i = 0; i < Math.min(orbit.photonPlayerNames.length, 3); i++) {
-                addText(orbit.root, "- " + orbit.photonPlayerNames[i], -0.18, -0.205 - i * 0.026, 15, color(0.85, 0.92, 1, 1));
+                addText(orbit.root, "- " + orbit.photonPlayerNames[i], -0.145, -0.155 - i * 0.022, 13, color(0.85, 0.92, 1, 1));
             }
         }
 
@@ -424,36 +433,45 @@
             const root = U.GameObject.new();
             root.method("set_name").invoke(Il2Cpp.string("[Orbit Cube Menu]"));
 
-            const panel = primitive(3, "[Orbit Panel]");
+            const panel = primitive(5, "[Orbit GUI Panel]");
             setParent(panel, root);
-            setLocal(panel, vec3(0, 0, 0), vec3(0.52, 0.39, 0.025), null);
+            setLocal(panel, vec3(0, 0, 0), vec3(0.34, 0.255, 1), euler(0, 180, 0));
             setColor(panel, color(0.012, 0.012, 0.018, 1));
 
             const borderColor = color(0.44, 0.2, 1, 1);
-            const top = primitive(3, "[Orbit Border Top]");
+            const top = primitive(5, "[Orbit Border Top]");
             setParent(top, root);
-            setLocal(top, vec3(0, 0.205, -0.03), vec3(0.54, 0.018, 0.018), null);
+            setLocal(top, vec3(0, 0.132, -0.006), vec3(0.36, 0.012, 1), euler(0, 180, 0));
             setColor(top, borderColor);
 
-            const bottom = primitive(3, "[Orbit Border Bottom]");
+            const bottom = primitive(5, "[Orbit Border Bottom]");
             setParent(bottom, root);
-            setLocal(bottom, vec3(0, -0.205, -0.03), vec3(0.54, 0.018, 0.018), null);
+            setLocal(bottom, vec3(0, -0.132, -0.006), vec3(0.36, 0.012, 1), euler(0, 180, 0));
             setColor(bottom, borderColor);
 
-            const left = primitive(3, "[Orbit Border Left]");
+            const left = primitive(5, "[Orbit Border Left]");
             setParent(left, root);
-            setLocal(left, vec3(-0.27, 0, -0.03), vec3(0.018, 0.39, 0.018), null);
+            setLocal(left, vec3(-0.18, 0, -0.006), vec3(0.012, 0.255, 1), euler(0, 180, 0));
             setColor(left, borderColor);
 
-            const right = primitive(3, "[Orbit Border Right]");
+            const right = primitive(5, "[Orbit Border Right]");
             setParent(right, root);
-            setLocal(right, vec3(0.27, 0, -0.03), vec3(0.018, 0.39, 0.018), null);
+            setLocal(right, vec3(0.18, 0, -0.006), vec3(0.012, 0.255, 1), euler(0, 180, 0));
             setColor(right, borderColor);
 
             orbit.root = root;
             rebuildRows();
             setActive(root, orbit.visible);
             log("cube menu built: " + root.handle.toString());
+        }
+
+        function buildPointer() {
+            if (orbit.pointer) return;
+            const pointer = primitive(0, "[Orbit Finger Selector]");
+            setLocal(pointer, vec3(0, 0, 0), vec3(0.018, 0.018, 0.018), null);
+            setColor(pointer, color(0.05, 0.85, 1, 1));
+            orbit.pointer = pointer;
+            log("finger selector built: " + pointer.handle.toString());
         }
 
         function placeMenu() {
@@ -465,14 +483,13 @@
             try {
                 const t = orbit.root.method("get_transform").invoke();
                 if (hand) {
-                    const hp = hand.method("get_position").invoke();
-                    t.method("set_position").invoke(hp);
+                    t.method("set_position").invoke(hand.method("get_position").invoke());
                     try {
                         const q = hand.method("get_rotation").invoke();
                         const e = q.method("get_eulerAngles").invoke();
                         const ex = e.field("x").value;
                         const ey = e.field("y").value;
-                        const ez = e.field("z").value + 180;
+                        const ez = e.field("z").value;
                         t.method("set_rotation").invoke(euler(ex, ey, ez));
                     } catch (_) {
                         try { t.method("set_rotation").invoke(hand.method("get_rotation").invoke()); } catch (_) {}
@@ -492,6 +509,58 @@
             } catch (e) {
                 log("placeMenu failed: " + safeString(e));
             }
+        }
+
+        function placePointer() {
+            if (!orbit.pointer) return;
+            const hand = getPointerHandTransform();
+            if (!hand) return;
+            try {
+                const hp = hand.method("get_position").invoke();
+                const hf = hand.method("get_forward").invoke();
+                const hu = hand.method("get_up").invoke();
+                const x = hp.field("x").value + hf.field("x").value * 0.08 + hu.field("x").value * 0.035;
+                const y = hp.field("y").value + hf.field("y").value * 0.08 + hu.field("y").value * 0.035;
+                const z = hp.field("z").value + hf.field("z").value * 0.08 + hu.field("z").value * 0.035;
+                const t = orbit.pointer.method("get_transform").invoke();
+                t.method("set_position").invoke(vec3(x, y, z));
+            } catch (e) {
+                log("placePointer failed: " + safeString(e));
+            }
+        }
+
+        function updatePointerHover() {
+            if (!orbit.visible || !orbit.root || !orbit.pointer) return;
+            try {
+                const rootT = orbit.root.method("get_transform").invoke();
+                const pointerPos = orbit.pointer.method("get_transform").invoke().method("get_position").invoke();
+                const local = rootT.method("InverseTransformPoint", 1).invoke(pointerPos);
+                const px = local.field("x").value;
+                const py = local.field("y").value;
+                const pz = local.field("z").value;
+                if (px < -0.19 || px > 0.19 || py < -0.13 || py > 0.08) return;
+
+                const items = currentItems();
+                const startY = 0.035;
+                let best = orbit.cursor;
+                let bestDist = 999;
+                for (let i = 0; i < items.length; i++) {
+                    const rowY = startY - i * 0.042;
+                    const d = Math.abs(py - rowY);
+                    if (d < bestDist) {
+                        best = i;
+                        bestDist = d;
+                    }
+                }
+                if (bestDist < 0.032 && best !== orbit.cursor) {
+                    orbit.cursor = best;
+                    rebuildRows();
+                }
+                if (bestDist < 0.032 && Math.abs(pz) < 0.055 && orbit.tickCount - orbit.lastTouchTick > 22) {
+                    orbit.lastTouchTick = orbit.tickCount;
+                    selectCurrent();
+                }
+            } catch (_) {}
         }
 
         function updateInput() {
@@ -526,8 +595,13 @@
             orbit.tickCount++;
             try {
                 buildMenu();
+                buildPointer();
                 updateInput();
-                if (orbit.visible) placeMenu();
+                placePointer();
+                if (orbit.visible) {
+                    placeMenu();
+                    updatePointerHover();
+                }
             } catch (e) {
                 log("menu tick failed: " + safeString(e));
             }
