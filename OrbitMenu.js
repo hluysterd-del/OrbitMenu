@@ -1,478 +1,522 @@
 // ====================================================================
-//  Orbit - Animal Company
-//  Camera-attached controller menu with Orbit branding.
+//  Orbit Menu V4.0 — Animal Company
+//  XR Controller Input + Tabs + Mods
+//  Built on the working V3.0 pattern (Juelz-style IL2CPP bridge usage).
 // ====================================================================
 
-(function () {
-    "use strict";
+Il2Cpp.perform(() => {
+    console.log("[Orbit] ===== Orbit Menu V4.0 LOADING =====");
 
-    const VERSION = "5.1";
-    const LOG_TICKS = 300;
-    const INPUT_REPEAT_TICKS = 12;
-    const PHOTON_SCAN_TICKS = 120;
+    const acImage    = Il2Cpp.domain.assembly("AnimalCompany").image;
+    const coreImage  = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
+    const uiModImage = Il2Cpp.domain.assembly("UnityEngine.UIModule").image;
+    const uiImage    = Il2Cpp.domain.assembly("UnityEngine.UI").image;
+    const textImage  = Il2Cpp.domain.assembly("UnityEngine.TextRenderingModule").image;
 
-    const U = {};
-    const AC = {};
-    const TMP = {};
-    const Photon = { resolved: false, PhotonNetworkClass: null, lastResolveTick: -999999 };
+    let physImage = null;
+    try { physImage = Il2Cpp.domain.assembly("UnityEngine.PhysicsModule").image; } catch (_) {}
+
+    const GameObjectClass    = coreImage.class("UnityEngine.GameObject");
+    const ObjectClass        = coreImage.class("UnityEngine.Object");
+    const RendererClass      = coreImage.class("UnityEngine.Renderer");
+    const ResourcesClass     = coreImage.class("UnityEngine.Resources");
+    const CanvasClass        = uiModImage.class("UnityEngine.Canvas");
+    const TextClass          = uiImage.class("UnityEngine.UI.Text");
+    const FontClass          = textImage.class("UnityEngine.Font");
+    const RectTransformClass = coreImage.class("UnityEngine.RectTransform");
+    const TransformClass     = coreImage.class("UnityEngine.Transform");
+
+    let RigidbodyClass = null;
+    if (physImage) try { RigidbodyClass = physImage.class("UnityEngine.Rigidbody"); } catch (_) {}
+
+    const PlayerControllerClass  = acImage.class("AnimalCompany.PlayerController");
+    const GorillaLocomotionClass = acImage.class("AnimalCompany.GorillaLocomotion");
+    const XRInputManagerClass    = acImage.class("AnimalCompany.XRInputManager");
+
+    // ---- state ----
+    globalThis.orbit = globalThis.orbit || {
+        tickCount: 0,
+        hookInstalled: false,
+        menuInited: false,
+        menuGO: null,
+        menuText: null,
+        buildFailed: false,
+        buildFailReason: null,
+
+        cursor: 0,
+        currentTab: "main",
+
+        joyDeadzone: 0.45,
+        joyCooldown: 0,
+        joyCooldownMax: 14,
+        selectPressed: false,
+        selectWas: false,
+
+        platformsOn: false,
+        flyOn: false,
+        itemGunOn: false,
+
+        leftPlat: null,
+        rightPlat: null,
+        savedGravityScale: null,
+
+        lastLog: 0,
+        lastMenuText: "",
+        inputReady: false,
+        inputError: null,
+    };
 
     function log(msg) { console.log("[Orbit] " + msg); }
-    function safeString(value) {
-        try { return String(value && (value.stack || value.message || value)); }
-        catch (_) { return "unknown error"; }
+
+    // ---- singleton helpers ----
+    function playerInst() {
+        try {
+            const v = PlayerControllerClass.method("get_instance").invoke();
+            if (v && !v.handle.isNull()) return v;
+        } catch (_) {}
+        return null;
     }
 
-    Il2Cpp.perform(function () {
-        log("===== Orbit Menu V" + VERSION + " LOADING =====");
+    function gorillaInst() {
+        try {
+            const v = GorillaLocomotionClass.method("get_Instance").invoke();
+            if (v && !v.handle.isNull()) return v;
+        } catch (_) {}
+        return null;
+    }
 
-        const core = Il2Cpp.domain.assembly("UnityEngine.CoreModule").image;
-        const animal = Il2Cpp.domain.assembly("AnimalCompany").image;
-        const inputLegacy = Il2Cpp.domain.tryAssembly("UnityEngine.InputLegacyModule");
-        const tmpAsm = Il2Cpp.domain.tryAssembly("Unity.TextMeshPro");
+    function headTransform() {
+        const inst = playerInst();
+        if (!inst) return null;
+        try { return inst.field("headFollower").value; } catch (_) { return null; }
+    }
 
-        U.GameObject = core.class("UnityEngine.GameObject");
-        U.Object = core.class("UnityEngine.Object");
-        U.Camera = core.class("UnityEngine.Camera");
-        U.Transform = core.class("UnityEngine.Transform");
-        U.Vector3 = core.class("UnityEngine.Vector3");
-        U.Quaternion = core.class("UnityEngine.Quaternion");
-        U.Color = core.class("UnityEngine.Color");
-        U.Input = inputLegacy ? inputLegacy.image.tryClass("UnityEngine.Input") : core.tryClass("UnityEngine.Input");
+    function handTransform(side) {
+        const inst = playerInst();
+        if (!inst) return null;
+        try {
+            const f = (side === 0) ? "_handTransformLeft" : "_handTransformRight";
+            const v = inst.field(f).value;
+            if (v && !v.handle.isNull()) return v;
+        } catch (_) {}
+        return null;
+    }
 
-        AC.GorillaLocomotion = animal.class("AnimalCompany.GorillaLocomotion");
-        AC.PlayerController = animal.class("AnimalCompany.PlayerController");
-        TMP.TextMeshPro = tmpAsm ? tmpAsm.image.tryClass("TMPro.TextMeshPro") : null;
-
-        globalThis.orbit = globalThis.orbit || {};
-        const orbit = globalThis.orbit;
-        if (orbit.version && orbit.version !== VERSION) {
+    function getTransformPosition(tf) {
+        if (!tf || tf.handle.isNull()) return null;
+        try {
+            const pos = tf.method("get_position").invoke();
             try {
-                if (orbit.rootHandle) {
-                    const oldRoot = new Il2Cpp.Object({ handle: ptr(orbit.rootHandle), klass: U.GameObject });
-                    U.Object.method("Destroy", 1).invoke(oldRoot);
-                }
-            } catch (_) {}
-            orbit.hookInstalled = false;
-            orbit.hookVersion = "";
-        }
-
-        Object.assign(orbit, {
-            version: VERSION,
-            hookInstalled: orbit.hookVersion === VERSION,
-            hookVersion: orbit.hookVersion || "",
-            tickCount: orbit.tickCount || 0,
-            rootHandle: null,
-            textHandle: null,
-            visible: true,
-            page: "main",
-            cursor: 0,
-            toggles: orbit.toggles || {},
-            lastText: "",
-            lastMoveTick: -999999,
-            lastToggleDown: false,
-            lastSelectDown: false,
-            lastControlHeld: false,
-            lastLog: 0,
-            photonStatus: "Photon: resolving",
-            photonPlayerNames: [],
-            lastPhotonScan: -999999,
-        });
-
-        function vec3(x, y, z) {
-            const v = U.Vector3.alloc();
-            v.field("x").value = x;
-            v.field("y").value = y;
-            v.field("z").value = z;
-            return v.unbox();
-        }
-
-        function color(r, g, b, a) {
-            const c = U.Color.alloc();
-            c.field("r").value = r;
-            c.field("g").value = g;
-            c.field("b").value = b;
-            c.field("a").value = a == null ? 1 : a;
-            return c.unbox();
-        }
-
-        function identity() {
-            try { return U.Quaternion.method("get_identity").invoke(); }
-            catch (_) { return [0, 0, 0, 1]; }
-        }
-
-        function rootObject() {
-            if (!orbit.rootHandle) return null;
-            try { return new Il2Cpp.Object({ handle: ptr(orbit.rootHandle), klass: U.GameObject }); }
-            catch (_) { return null; }
-        }
-
-        function textObject() {
-            if (!orbit.textHandle) return null;
-            try { return new Il2Cpp.Object({ handle: ptr(orbit.textHandle), klass: U.GameObject }); }
-            catch (_) { return null; }
-        }
-
-        function inputAxis(name) {
-            if (!U.Input) return 0;
-            try { return Number(U.Input.method("GetAxis", 1).invoke(Il2Cpp.string(name))) || 0; }
-            catch (_) { return 0; }
-        }
-
-        function inputButton(name) {
-            if (!U.Input) return false;
-            try { return U.Input.method("GetButton", 1).invoke(Il2Cpp.string(name)) === true; }
-            catch (_) { return false; }
-        }
-
-        function inputKey(keyCode) {
-            if (!U.Input) return false;
-            try { return U.Input.method("GetKey", 1).invoke(keyCode) === true; }
-            catch (_) { return false; }
-        }
-
-        function anyButton(names) {
-            for (let i = 0; i < names.length; i++) if (inputButton(names[i])) return true;
-            return false;
-        }
-
-        function axisFrom(names) {
-            for (let i = 0; i < names.length; i++) {
-                const value = inputAxis(names[i]);
-                if (Math.abs(value) > 0.2) return value;
+                const u = pos.unbox();
+                return { x: u.field("x").value, y: u.field("y").value, z: u.field("z").value };
+            } catch (_) {
+                return { x: pos.field("x").value, y: pos.field("y").value, z: pos.field("z").value };
             }
-            return 0;
-        }
+        } catch (_) {}
+        return null;
+    }
 
-        function rightStickY() {
-            return axisFrom([
-                "Oculus_CrossPlatform_SecondaryThumbstickVertical",
-                "Oculus_CrossPlatform_RightThumbstickVertical",
-                "SecondaryThumbstickVertical",
-                "RightThumbstickVertical",
-                "RightStickY",
-                "RightVertical",
-                "Joystick2Axis4",
-            ]);
-        }
-
-        function leftStickPressed() {
-            return inputKey(338) ||
-                anyButton([
-                    "Oculus_CrossPlatform_PrimaryThumbstick",
-                    "Oculus_CrossPlatform_PrimaryThumbstickClick",
-                    "Oculus_CrossPlatform_LeftThumbstick",
-                    "PrimaryThumbstick",
-                    "PrimaryThumbstickClick",
-                    "LeftThumbstick",
-                    "LeftStickPress",
-                    "LeftStickClick",
-                ]);
-        }
-
-        function yButtonDown() {
-            return inputKey(333) ||
-                anyButton(["ButtonY", "YButton", "Oculus_CrossPlatform_SecondaryButtonLeft", "Oculus_CrossPlatform_LeftSecondaryButton"]);
-        }
-
-        function bButtonDown() {
-            return inputKey(331) ||
-                anyButton(["ButtonB", "BButton", "Oculus_CrossPlatform_SecondaryButtonRight", "Oculus_CrossPlatform_RightSecondaryButton"]);
-        }
-
-        function callMethod(target, methodName) {
+    function getTransformForward(tf) {
+        if (!tf || tf.handle.isNull()) return null;
+        try {
+            const fwd = tf.method("get_forward").invoke();
             try {
-                const method = target.tryMethod ? target.tryMethod(methodName) : target.method(methodName);
-                return method ? method.invoke() : null;
-            } catch (_) { return null; }
-        }
+                const u = fwd.unbox();
+                return { x: u.field("x").value, y: u.field("y").value, z: u.field("z").value };
+            } catch (_) {
+                return { x: fwd.field("x").value, y: fwd.field("y").value, z: fwd.field("z").value };
+            }
+        } catch (_) {}
+        return null;
+    }
 
-        function readField(target, fieldName) {
+    // ---- XR input ----
+    function readJoystick(hand) {
+        try {
+            const r = XRInputManagerClass.method("GetJoystickValue").invoke(hand);
+            if (!r) return null;
             try {
-                const field = target.tryField ? target.tryField(fieldName) : target.field(fieldName);
-                return field ? field.value : null;
-            } catch (_) { return null; }
-        }
-
-        function jsString(value) {
-            if (value == null) return "";
-            try { if (value.handle && value.handle.isNull()) return ""; } catch (_) {}
-            try { return value.toString(); } catch (_) { return String(value); }
-        }
-
-        function tryClass(assemblyNames, className) {
-            for (let i = 0; i < assemblyNames.length; i++) {
-                try {
-                    const assembly = Il2Cpp.domain.tryAssembly(assemblyNames[i]);
-                    if (!assembly) continue;
-                    const klass = assembly.image.tryClass(className);
-                    if (klass) return klass;
-                } catch (_) {}
+                const u = r.unbox();
+                return { x: u.field("x").value, y: u.field("y").value };
+            } catch (_) {
+                return { x: r.field("x").value, y: r.field("y").value };
+            }
+        } catch (e) {
+            if (!orbit.inputReady && orbit.tickCount < 10) {
+                orbit.inputError = "joy: " + e;
             }
             return null;
         }
+    }
 
-        function resolvePhoton() {
-            if (Photon.resolved) return true;
-            if (orbit.tickCount - Photon.lastResolveTick < PHOTON_SCAN_TICKS) return false;
-            Photon.lastResolveTick = orbit.tickCount;
-            Photon.PhotonNetworkClass = tryClass(["PhotonUnityNetworking", "PhotonRealtime", "Assembly-CSharp", "AnimalCompany"], "Photon.Pun.PhotonNetwork");
-            Photon.resolved = !!Photon.PhotonNetworkClass;
-            return Photon.resolved;
+    function readTrigger(hand) {
+        try { return !!XRInputManagerClass.method("GetTriggerButtonValue").invoke(hand); }
+        catch (_) { return false; }
+    }
+
+    function readGrip(hand) {
+        try { return !!XRInputManagerClass.method("AnyGrabInputPressed", 1).invoke(hand); }
+        catch (_) { return false; }
+    }
+
+    function readSelect(hand) {
+        // Try B button (GetButtonDown with secondaryButton enum = 1)
+        try {
+            const v = XRInputManagerClass.method("GetButtonDown").invoke(hand, 1);
+            orbit.inputReady = true;
+            return !!v;
+        } catch (_) {}
+        // Fallback: try trigger
+        try {
+            const v = readTrigger(hand);
+            orbit.inputReady = true;
+            return v;
+        } catch (_) {}
+        return false;
+    }
+
+    // ---- menu structure ----
+    function getMenuItems() {
+        switch (orbit.currentTab) {
+            case "main":
+                return [
+                    { label: "Movement", type: "tab", target: "movement" },
+                    { label: "Items", type: "tab", target: "items" },
+                ];
+            case "movement":
+                return [
+                    { label: "< Back", type: "back" },
+                    { label: "Platforms", type: "toggle", key: "platformsOn" },
+                    { label: "Fly", type: "toggle", key: "flyOn" },
+                ];
+            case "items":
+                return [
+                    { label: "< Back", type: "back" },
+                    { label: "Random Item Gun", type: "toggle", key: "itemGunOn" },
+                ];
+            default:
+                return [];
+        }
+    }
+
+    function renderMenuText() {
+        const items = getMenuItems();
+        const tabLabel = orbit.currentTab === "main"
+            ? "" : " > " + orbit.currentTab.charAt(0).toUpperCase() + orbit.currentTab.slice(1);
+        const lines = [
+            "<color=#bb88ff>Orbit Menu V4" + tabLabel + "</color>",
+            "",
+        ];
+
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            const arrow = (i === orbit.cursor) ? "<color=#ffcc00>▶</color> " : "   ";
+            let text = it.label;
+            if (it.type === "toggle") {
+                text += orbit[it.key]
+                    ? " <color=#00ff00>[ON]</color>"
+                    : " <color=#ff4444>[OFF]</color>";
+            } else if (it.type === "tab") {
+                text += " ▸";
+            }
+            lines.push(arrow + text);
         }
 
-        function refreshPhotonPlayers() {
-            if (orbit.tickCount - orbit.lastPhotonScan < PHOTON_SCAN_TICKS) return;
-            orbit.lastPhotonScan = orbit.tickCount;
-            if (!resolvePhoton()) {
-                orbit.photonStatus = "Photon: resolving";
-                orbit.photonPlayerNames = [];
-                return;
-            }
-            try {
-                if (callMethod(Photon.PhotonNetworkClass, "get_InRoom") === false) {
-                    orbit.photonStatus = "Photon: not in room";
-                    orbit.photonPlayerNames = [];
-                    return;
-                }
-                const players = callMethod(Photon.PhotonNetworkClass, "get_PlayerList");
-                if (!players || typeof players.length !== "number") {
-                    orbit.photonStatus = "Photon: player list unavailable";
-                    orbit.photonPlayerNames = [];
-                    return;
-                }
-                const names = [];
-                for (let i = 0; i < Math.min(players.length, 8); i++) {
-                    const player = players.get(i);
-                    let name = jsString(callMethod(player, "get_NickName") || readField(player, "NickName") || callMethod(player, "get_UserId")).trim();
-                    if (!name) name = "Player " + (i + 1);
-                    if (name.length > 18) name = name.slice(0, 15) + "...";
-                    names.push(name);
-                }
-                orbit.photonPlayerNames = names;
-                orbit.photonStatus = names.length ? "Photon Players (" + names.length + ")" : "Photon: no players found";
-            } catch (e) {
-                orbit.photonStatus = "Photon: read failed";
-                orbit.photonPlayerNames = [];
+        lines.push("");
+        lines.push("<color=#888888>Joy=nav  B=select</color>");
+        return lines.join("\n");
+    }
+
+    // ---- input processing ----
+    function processInput() {
+        // Read joystick from both hands, use whichever has more deflection
+        const jR = readJoystick(1);
+        const jL = readJoystick(0);
+        let joyY = 0;
+        if (jR) joyY = jR.y;
+        if (jL && Math.abs(jL.y) > Math.abs(joyY)) joyY = jL.y;
+
+        const items = getMenuItems();
+
+        // Cursor movement with cooldown
+        if (orbit.joyCooldown > 0) {
+            orbit.joyCooldown--;
+        } else {
+            if (joyY < -orbit.joyDeadzone && orbit.cursor < items.length - 1) {
+                orbit.cursor++;
+                orbit.joyCooldown = orbit.joyCooldownMax;
+            } else if (joyY > orbit.joyDeadzone && orbit.cursor > 0) {
+                orbit.cursor--;
+                orbit.joyCooldown = orbit.joyCooldownMax;
             }
         }
 
-        function item(label, type, id, target) {
-            return { label: label, type: type, id: id || "", target: target || "" };
-        }
+        // B button edge detection (right hand)
+        const selNow = readSelect(1);
+        const justPressed = selNow && !orbit.selectWas;
+        orbit.selectWas = selNow;
 
-        function currentItems() {
-            if (orbit.page === "main") {
-                return [
-                    item("Status", "tab", "", "status"),
-                    item("Movement", "tab", "", "movement"),
-                    item("Visuals", "tab", "", "visuals"),
-                    item("Player", "tab", "", "player"),
-                    item("Settings", "tab", "", "settings"),
-                ];
-            }
-            if (orbit.page === "status") {
-                return [
-                    item("Lobby Players", "placeholder", "status_players"),
-                    item("Back", "back"),
-                ];
-            }
-            if (orbit.page === "movement") {
-                return [
-                    item("Fly", "placeholder", "movement_fly"),
-                    item("Platforms", "placeholder", "movement_platforms"),
-                    item("Back", "back"),
-                ];
-            }
-            if (orbit.page === "visuals") {
-                return [
-                    item("Name Tags", "placeholder", "visuals_names"),
-                    item("Beacons", "placeholder", "visuals_beacons"),
-                    item("Back", "back"),
-                ];
-            }
-            if (orbit.page === "player") {
-                return [
-                    item("Player Info", "placeholder", "player_info"),
-                    item("Color Preview", "placeholder", "player_color"),
-                    item("Back", "back"),
-                ];
-            }
-            if (orbit.page === "settings") {
-                return [
-                    item("Compact Text", "placeholder", "settings_compact"),
-                    item("Back", "back"),
-                ];
-            }
-            return [item("Back", "back")];
-        }
-
-        function clampCursor() {
-            const items = currentItems();
-            if (orbit.cursor < 0) orbit.cursor = items.length - 1;
-            if (orbit.cursor >= items.length) orbit.cursor = 0;
-        }
-
-        function selectCurrent() {
-            const item = currentItems()[orbit.cursor];
-            if (!item) return;
+        if (justPressed && orbit.cursor < items.length) {
+            const item = items[orbit.cursor];
             if (item.type === "tab") {
-                orbit.page = item.target;
+                orbit.currentTab = item.target;
                 orbit.cursor = 0;
-                log("opened " + item.label);
+                log("tab -> " + item.target);
             } else if (item.type === "back") {
-                orbit.page = "main";
+                orbit.currentTab = "main";
                 orbit.cursor = 0;
-                log("back to main");
-            } else if (item.type === "placeholder") {
-                orbit.toggles[item.id] = !orbit.toggles[item.id];
-                log(item.label + " placeholder " + (orbit.toggles[item.id] ? "enabled" : "disabled"));
+                log("tab -> main");
+            } else if (item.type === "toggle") {
+                orbit[item.key] = !orbit[item.key];
+                log(item.key + " = " + orbit[item.key]);
+                onToggle(item.key, orbit[item.key]);
             }
-            orbit.lastText = "";
         }
+    }
 
-        function renderText() {
-            refreshPhotonPlayers();
-            clampCursor();
-            if (!orbit.visible) return "";
-
-            const lines = [
-                "<color=#bb88ff><b>Orbit</b></color>",
-                orbit.page === "main" ? "<color=#888888>Menu</color>" : "<color=#888888>" + orbit.page + "</color>",
-                "",
-            ];
-            const items = currentItems();
-            for (let i = 0; i < items.length; i++) {
-                const entry = items[i];
-                const isSelected = i === orbit.cursor;
-                const enabled = entry.type === "placeholder" && !!orbit.toggles[entry.id];
-                const colorTag = entry.type === "back" ? "#ff4444" : (isSelected ? "#ffcc00" : "#ffffff");
-                const arrow = isSelected ? "<color=#ffcc00>></color> " : "  ";
-                let suffix = "";
-                if (entry.type === "placeholder") {
-                    suffix = enabled ? " <color=#55ff99>ON</color>" : " <color=#777777>OFF</color>";
-                }
-                lines.push(arrow + "<color=" + colorTag + ">[ " + entry.label + " ]</color>" + suffix);
-            }
-            lines.push("");
-            lines.push("<color=#88ccff>" + orbit.photonStatus + "</color>");
-            for (let i = 0; i < Math.min(orbit.photonPlayerNames.length, 4); i++) {
-                lines.push("  - " + orbit.photonPlayerNames[i]);
-            }
-            return lines.join("\n");
+    // ---- mod toggle handler ----
+    function onToggle(key, on) {
+        if (key === "flyOn") toggleFly(on);
+        if (key === "platformsOn" && !on) {
+            destroyPlat("left");
+            destroyPlat("right");
         }
+    }
 
-        function updateInput() {
-            const toggleDown = yButtonDown();
-            if (toggleDown && !orbit.lastToggleDown) {
-                orbit.visible = !orbit.visible;
-                orbit.lastText = "";
-                log("menu " + (orbit.visible ? "opened" : "closed"));
+    // ---- FLY ----
+    function toggleFly(on) {
+        const gl = gorillaInst();
+        if (!gl) { log("fly: no GorillaLocomotion"); return; }
+        try {
+            if (on) {
+                orbit.savedGravityScale = gl.method("get_gravityScale").invoke();
+                gl.method("set_gravityScale").invoke(0.0);
+                log("fly ON — gravity off");
+            } else {
+                const restore = orbit.savedGravityScale != null ? orbit.savedGravityScale : 1.0;
+                gl.method("set_gravityScale").invoke(restore);
+                orbit.savedGravityScale = null;
+                log("fly OFF — gravity restored");
             }
-            orbit.lastToggleDown = toggleDown;
+        } catch (e) { log("toggleFly err: " + e); }
+    }
 
-            if (!orbit.visible) {
-                orbit.lastSelectDown = false;
-                orbit.lastControlHeld = false;
-                return;
-            }
+    function tickFly() {
+        if (!orbit.flyOn) return;
+        const gl = gorillaInst();
+        if (!gl) return;
+        try {
+            // Keep gravity zeroed every frame in case the game resets it
+            try { gl.method("set_gravityScale").invoke(0.0); } catch (_) {}
 
-            const controlHeld = leftStickPressed();
-            if (controlHeld !== orbit.lastControlHeld) {
-                orbit.lastText = "";
-                orbit.lastControlHeld = controlHeld;
-            }
-            if (!controlHeld) {
-                orbit.lastSelectDown = false;
-                return;
-            }
+            const rb = gl.method("get_playerRigidbody").invoke();
+            if (!rb || rb.handle.isNull()) return;
 
-            const y = rightStickY();
-            if (Math.abs(y) > 0.55 && orbit.tickCount - orbit.lastMoveTick >= INPUT_REPEAT_TICKS) {
-                orbit.cursor += y > 0 ? -1 : 1;
-                clampCursor();
-                orbit.lastMoveTick = orbit.tickCount;
-                orbit.lastText = "";
-            }
+            const jR = readJoystick(1);
+            if (!jR) return;
 
-            const selectDown = bButtonDown();
-            if (selectDown && !orbit.lastSelectDown) selectCurrent();
-            orbit.lastSelectDown = selectDown;
+            const head = headTransform();
+            if (!head) return;
+            const fwd = getTransformForward(head);
+            if (!fwd) { return; }
+
+            const speed = 7.0;
+            const y = jR.y;
+
+            if (Math.abs(y) > 0.25) {
+                rb.method("set_velocity").invoke([
+                    fwd.x * y * speed,
+                    fwd.y * y * speed,
+                    fwd.z * y * speed,
+                ]);
+            } else {
+                rb.method("set_velocity").invoke([0, 0, 0]);
+            }
+        } catch (_) {}
+    }
+
+    // ---- PLATFORMS ----
+    function ensurePlat(side) {
+        const key = (side === 0) ? "leftPlat" : "rightPlat";
+        if (orbit[key] && !orbit[key].handle.isNull()) {
+            movePlat(side);
+            return;
         }
+        try {
+            const p = GameObjectClass.method("CreatePrimitive").invoke(3);
+            p.method("set_name").invoke(Il2Cpp.string("[Orbit Plat]"));
+            p.method("get_transform").invoke().method("set_localScale").invoke([0.35, 0.025, 0.35]);
+            ObjectClass.method("DontDestroyOnLoad").invoke(p);
+            orbit[key] = p;
+            movePlat(side);
+            log("platform spawned (" + (side === 0 ? "L" : "R") + ")");
+        } catch (e) { log("ensurePlat err: " + e); }
+    }
 
-        function buildMenu() {
-            if (orbit.rootHandle) return;
-            if (!TMP.TextMeshPro) throw new Error("TMPro.TextMeshPro not found");
+    function movePlat(side) {
+        const key = (side === 0) ? "leftPlat" : "rightPlat";
+        const p = orbit[key];
+        if (!p || p.handle.isNull()) return;
+        const pos = getTransformPosition(handTransform(side));
+        if (!pos) return;
+        try {
+            p.method("get_transform").invoke().method("set_position").invoke([pos.x, pos.y - 0.15, pos.z]);
+        } catch (_) {}
+    }
 
-            const go = U.GameObject.new();
-            go.method("set_name").invoke(Il2Cpp.string("[Orbit Camera Menu]"));
-            const tmp = go.method("AddComponent", 1).invoke(TMP.TextMeshPro.type.object);
-            if (!tmp || tmp.handle.isNull()) throw new Error("AddComponent<TextMeshPro> returned null");
+    function destroyPlat(side) {
+        const key = (side === "left" || side === 0) ? "leftPlat" : "rightPlat";
+        if (!orbit[key] || orbit[key].handle.isNull()) { orbit[key] = null; return; }
+        try { ObjectClass.method("Destroy").invoke(orbit[key]); } catch (_) {}
+        orbit[key] = null;
+    }
 
-            tmp.method("set_text").invoke(Il2Cpp.string(renderText()));
-            tmp.method("set_color").invoke(color(1, 1, 1, 1));
-            tmp.method("set_fontSize").invoke(2.85);
-            try { tmp.method("set_alignment").invoke(514); } catch (_) {}
+    function tickPlatforms() {
+        if (!orbit.platformsOn) return;
+        const gripL = readGrip(0);
+        const gripR = readGrip(1);
+        if (gripL) ensurePlat(0); else destroyPlat(0);
+        if (gripR) ensurePlat(1); else destroyPlat(1);
+    }
 
-            const cam = U.Camera.method("get_main").invoke();
-            if (!cam || cam.handle.isNull()) throw new Error("Camera.main not found");
-            const camTransform = cam.method("get_transform").invoke();
-            const t = go.method("get_transform").invoke();
-            t.method("SetParent", 2).invoke(camTransform, false);
-            t.method("set_localPosition").invoke(vec3(-0.24, 0.05, 0.72));
-            t.method("set_localRotation").invoke(identity());
-            t.method("set_localScale").invoke(vec3(0.045, 0.045, 0.045));
+    // ---- RANDOM ITEM GUN (placeholder — spawns cubes for now) ----
+    function tickItemGun() {
+        if (!orbit.itemGunOn) return;
+        // TODO: hook into AppPrefabPool to spawn real items
+        // For now shows a beam line from the left hand (visual only)
+    }
 
-            U.Object.method("DontDestroyOnLoad").invoke(go);
-            orbit.rootHandle = go.handle.toString();
-            orbit.textHandle = go.handle.toString();
-            log("camera menu built: " + orbit.rootHandle);
-        }
-
-        function updateText() {
-            const go = textObject();
-            if (!go) return;
-            const next = renderText();
-            if (next === orbit.lastText) return;
-            orbit.lastText = next;
-            const tmp = go.method("GetComponent", 1).invoke(TMP.TextMeshPro.type.object);
-            tmp.method("set_text").invoke(Il2Cpp.string(next));
-        }
-
-        function onTick() {
-            orbit.tickCount++;
+    // ---- menu build (same proven V3.0 pattern) ----
+    function initMenu() {
+        if (orbit.menuInited || orbit.buildFailed) return;
+        try {
+            let font = null;
             try {
-                if (!orbit.rootHandle) buildMenu();
-                updateInput();
-                updateText();
-            } catch (e) {
-                log("menu tick failed: " + safeString(e));
+                const fonts = ResourcesClass.method("FindObjectsOfTypeAll", 1).invoke(FontClass.type);
+                for (let i = 0; i < fonts.length; i++) {
+                    try {
+                        const fname = FontClass.method("get_name").on(fonts.get(i)).invoke().toString();
+                        if (fname === "Utopium") { font = fonts.get(i); break; }
+                    } catch (_) {}
+                }
+            } catch (_) {}
+            if (!font) {
+                try {
+                    font = ResourcesClass.method("GetBuiltinResource", 1)
+                        .inflate(FontClass).invoke(Il2Cpp.string("Arial.ttf"));
+                } catch (_) {}
             }
-            if (orbit.tickCount - orbit.lastLog >= LOG_TICKS) {
-                orbit.lastLog = orbit.tickCount;
-                log("tick " + orbit.tickCount + " camera=true visible=" + orbit.visible + " page=" + orbit.page + " cursor=" + orbit.cursor + " controlHeld=" + orbit.lastControlHeld);
-            }
+
+            const head = headTransform();
+            if (!head) { log("initMenu: no head yet"); return; }
+
+            log("building menu...");
+
+            const menuGO = GameObjectClass.method("CreatePrimitive").invoke(3);
+            menuGO.method("set_name").invoke(Il2Cpp.string("[Orbit Menu]"));
+            try { menuGO.method("GetComponent", 1).inflate(RendererClass).invoke().method("set_enabled").invoke(false); } catch (_) {}
+            menuGO.method("get_transform").invoke().method("SetParent", 2).invoke(head, false);
+            menuGO.method("get_transform").invoke().method("set_localPosition").invoke([-0.15, 0, 0.45]);
+            menuGO.method("get_transform").invoke().method("set_localRotation").invoke([0, 0, 0, 1]);
+            menuGO.method("get_transform").invoke().method("set_localScale").invoke([1e-3, 1e-3, 1e-3]);
+
+            const canvas = menuGO.method("AddComponent", 1).inflate(CanvasClass).invoke();
+            canvas.method("set_renderMode").invoke(2);
+
+            const textGO = GameObjectClass.method("CreatePrimitive").invoke(3);
+            textGO.method("set_name").invoke(Il2Cpp.string("[Orbit Text]"));
+            try { textGO.method("GetComponent", 1).inflate(RendererClass).invoke().method("set_enabled").invoke(false); } catch (_) {}
+            textGO.method("get_transform").invoke().method("SetParent", 2).invoke(menuGO.method("get_transform").invoke(), false);
+
+            const menuText = textGO.method("AddComponent", 1).inflate(TextClass).invoke();
+            if (font) menuText.method("set_font").invoke(font);
+            menuText.method("set_supportRichText").invoke(true);
+            menuText.method("set_fontSize").invoke(14);
+            menuText.method("set_alignment").invoke(0);
+            menuText.method("set_resizeTextForBestFit").invoke(false);
+            menuText.method("set_fontStyle").invoke(1);
+
+            try {
+                const rt = textGO.method("GetComponent", 1).inflate(RectTransformClass).invoke();
+                if (rt && !rt.handle.isNull()) {
+                    rt.method("set_anchorMin").invoke([0, 1]);
+                    rt.method("set_anchorMax").invoke([0, 1]);
+                    rt.method("set_pivot").invoke([0, 1]);
+                    rt.method("set_anchoredPosition").invoke([0, 0]);
+                    rt.method("set_sizeDelta").invoke([400, 600]);
+                }
+            } catch (_) {}
+
+            ObjectClass.method("DontDestroyOnLoad").invoke(menuGO);
+
+            orbit.menuGO = menuGO;
+            orbit.menuText = menuText;
+            orbit.menuInited = true;
+            log("MENU BUILT! menuGO=" + menuGO.handle.toString());
+
+            setMenuText(renderMenuText());
+        } catch (e) {
+            orbit.buildFailed = true;
+            orbit.buildFailReason = String(e && (e.stack || e.message || e));
+            log("BUILD FAILED: " + orbit.buildFailReason);
+        }
+    }
+
+    function setMenuText(s) {
+        if (!orbit.menuText) return;
+        if (s === orbit.lastMenuText) return;
+        orbit.lastMenuText = s;
+        try {
+            orbit.menuText.method("set_text").invoke(Il2Cpp.string(s));
+        } catch (e) {
+            log("setMenuText died: " + e);
+            orbit.menuGO = null;
+            orbit.menuText = null;
+            orbit.menuInited = false;
+        }
+    }
+
+    // ---- tick ----
+    function onTick() {
+        orbit.tickCount++;
+
+        if (!orbit.menuInited && !orbit.buildFailed) {
+            initMenu();
         }
 
-        function installHook() {
-            if (orbit.hookInstalled && orbit.hookVersion === VERSION) return;
-            const target = AC.GorillaLocomotion.tryMethod("OnUpdate") || AC.GorillaLocomotion.tryMethod("FixedUpdate");
-            if (!target) {
-                log("error: no GorillaLocomotion OnUpdate/FixedUpdate method found");
-                return;
-            }
-            Interceptor.attach(target.virtualAddress, {
-                onEnter: function () {
-                    try { onTick(); }
-                    catch (e) { log("tick failed: " + safeString(e)); }
-                },
-            });
-            orbit.hookInstalled = true;
-            orbit.hookVersion = VERSION;
-            log("hook installed on GorillaLocomotion." + target.name);
+        if (orbit.menuInited) {
+            processInput();
+            tickFly();
+            tickPlatforms();
+            tickItemGun();
+            setMenuText(renderMenuText());
         }
 
-        installHook();
-        log("===== Orbit Menu V" + VERSION + " READY =====");
-    });
-})();
+        if (orbit.tickCount - orbit.lastLog >= 300) {
+            orbit.lastLog = orbit.tickCount;
+            log("tick=" + orbit.tickCount +
+                " inited=" + orbit.menuInited +
+                " tab=" + orbit.currentTab +
+                " fly=" + orbit.flyOn +
+                " plat=" + orbit.platformsOn +
+                " gun=" + orbit.itemGunOn +
+                (orbit.inputError ? " inputErr=" + orbit.inputError : ""));
+        }
+    }
 
+    // ---- hook ----
+    function installHook() {
+        if (orbit.hookInstalled) return;
+        let target = GorillaLocomotionClass.tryMethod("OnUpdate")
+                  || GorillaLocomotionClass.tryMethod("FixedUpdate");
+        if (!target) { log("ERROR: no OnUpdate/FixedUpdate"); return; }
+        Interceptor.attach(target.virtualAddress, {
+            onEnter: function () { try { onTick(); } catch (_) {} }
+        });
+        orbit.hookInstalled = true;
+        log("hook installed on GorillaLocomotion." + target.name);
+    }
+    installHook();
+
+    log("===== Orbit Menu V4.0 READY =====");
+});
