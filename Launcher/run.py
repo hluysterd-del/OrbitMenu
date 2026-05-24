@@ -134,6 +134,26 @@ def fetch_latest_build():
         sys.exit(f"[!] {e}")
 
 
+def launch_frida(cmd):
+    injected = False
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    ) as proc:
+        for line in proc.stdout:
+            print(line, end="")
+            if not injected and "[Orbit]" in line and ("READY" in line or "hook installed" in line):
+                injected = True
+                print("[+] Successfully injected Orbit Menu.")
+        proc.wait()
+
+    if not injected:
+        print("[!] Frida exited before Orbit Menu reported a successful injection.")
+
+
 def main():
     banner()
     frida = ensure_frida()
@@ -149,7 +169,7 @@ def main():
 
     print("[*] launching Orbit Menu...")
     try:
-        subprocess.run(cmd)
+        launch_frida(cmd)
     except KeyboardInterrupt:
         pass
 
