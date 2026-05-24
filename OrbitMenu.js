@@ -6,9 +6,9 @@
 (function () {
     "use strict";
 
-    const VERSION = "5.0";
+    const VERSION = "5.1";
     const LOG_TICKS = 300;
-    const INPUT_REPEAT_TICKS = 14;
+    const INPUT_REPEAT_TICKS = 12;
     const PHOTON_SCAN_TICKS = 120;
 
     const U = {};
@@ -66,10 +66,12 @@
             visible: true,
             page: "main",
             cursor: 0,
+            toggles: orbit.toggles || {},
             lastText: "",
             lastMoveTick: -999999,
             lastToggleDown: false,
             lastSelectDown: false,
+            lastControlHeld: false,
             lastLog: 0,
             photonStatus: "Photon: resolving",
             photonPlayerNames: [],
@@ -133,19 +135,38 @@
             return false;
         }
 
-        function leftStickY() {
-            const names = [
-                "Oculus_CrossPlatform_PrimaryThumbstickVertical",
-                "PrimaryThumbstickVertical",
-                "LeftStickY",
-                "LeftVertical",
-                "Vertical",
-            ];
+        function axisFrom(names) {
             for (let i = 0; i < names.length; i++) {
                 const value = inputAxis(names[i]);
                 if (Math.abs(value) > 0.2) return value;
             }
             return 0;
+        }
+
+        function rightStickY() {
+            return axisFrom([
+                "Oculus_CrossPlatform_SecondaryThumbstickVertical",
+                "Oculus_CrossPlatform_RightThumbstickVertical",
+                "SecondaryThumbstickVertical",
+                "RightThumbstickVertical",
+                "RightStickY",
+                "RightVertical",
+                "Joystick2Axis4",
+            ]);
+        }
+
+        function leftStickPressed() {
+            return inputKey(338) ||
+                anyButton([
+                    "Oculus_CrossPlatform_PrimaryThumbstick",
+                    "Oculus_CrossPlatform_PrimaryThumbstickClick",
+                    "Oculus_CrossPlatform_LeftThumbstick",
+                    "PrimaryThumbstick",
+                    "PrimaryThumbstickClick",
+                    "LeftThumbstick",
+                    "LeftStickPress",
+                    "LeftStickClick",
+                ]);
         }
 
         function yButtonDown() {
@@ -235,24 +256,54 @@
             }
         }
 
+        function item(label, type, id, target) {
+            return { label: label, type: type, id: id || "", target: target || "" };
+        }
+
         function currentItems() {
             if (orbit.page === "main") {
                 return [
-                    { label: "Status", type: "tab", target: "status" },
-                    { label: "Movement", type: "tab", target: "movement" },
-                    { label: "Visuals", type: "tab", target: "visuals" },
-                    { label: "Player", type: "tab", target: "player" },
-                    { label: "Settings", type: "tab", target: "settings" },
+                    item("Status", "tab", "", "status"),
+                    item("Movement", "tab", "", "movement"),
+                    item("Visuals", "tab", "", "visuals"),
+                    item("Player", "tab", "", "player"),
+                    item("Settings", "tab", "", "settings"),
+                ];
+            }
+            if (orbit.page === "status") {
+                return [
+                    item("Lobby Players", "placeholder", "status_players"),
+                    item("Back", "back"),
                 ];
             }
             if (orbit.page === "movement") {
                 return [
-                    { label: "Fly", type: "placeholder" },
-                    { label: "Platforms", type: "placeholder" },
-                    { label: "Back", type: "back" },
+                    item("Fly", "placeholder", "movement_fly"),
+                    item("Platforms", "placeholder", "movement_platforms"),
+                    item("Back", "back"),
                 ];
             }
-            return [{ label: "Back", type: "back" }];
+            if (orbit.page === "visuals") {
+                return [
+                    item("Name Tags", "placeholder", "visuals_names"),
+                    item("Beacons", "placeholder", "visuals_beacons"),
+                    item("Back", "back"),
+                ];
+            }
+            if (orbit.page === "player") {
+                return [
+                    item("Player Info", "placeholder", "player_info"),
+                    item("Color Preview", "placeholder", "player_color"),
+                    item("Back", "back"),
+                ];
+            }
+            if (orbit.page === "settings") {
+                return [
+                    item("Compact Text", "placeholder", "settings_compact"),
+                    item("Back", "back"),
+                ];
+            }
+            return [item("Back", "back")];
         }
 
         function clampCursor() {
@@ -267,11 +318,14 @@
             if (item.type === "tab") {
                 orbit.page = item.target;
                 orbit.cursor = 0;
+                log("opened " + item.label);
             } else if (item.type === "back") {
                 orbit.page = "main";
                 orbit.cursor = 0;
+                log("back to main");
             } else if (item.type === "placeholder") {
-                log(item.label + " is a placeholder.");
+                orbit.toggles[item.id] = !orbit.toggles[item.id];
+                log(item.label + " placeholder " + (orbit.toggles[item.id] ? "enabled" : "disabled"));
             }
             orbit.lastText = "";
         }
@@ -288,11 +342,16 @@
             ];
             const items = currentItems();
             for (let i = 0; i < items.length; i++) {
-                const item = items[i];
+                const entry = items[i];
                 const isSelected = i === orbit.cursor;
-                const colorTag = item.type === "back" ? "#ff4444" : (isSelected ? "#ffcc00" : "#ffffff");
-                const suffix = item.type === "placeholder" ? " <color=#777777>placeholder</color>" : "";
-                lines.push((isSelected ? "<color=#ffcc00>></color> " : "  ") + "<color=" + colorTag + ">[ " + item.label + " ]</color>" + suffix);
+                const enabled = entry.type === "placeholder" && !!orbit.toggles[entry.id];
+                const colorTag = entry.type === "back" ? "#ff4444" : (isSelected ? "#ffcc00" : "#ffffff");
+                const arrow = isSelected ? "<color=#ffcc00>></color> " : "  ";
+                let suffix = "";
+                if (entry.type === "placeholder") {
+                    suffix = enabled ? " <color=#55ff99>ON</color>" : " <color=#777777>OFF</color>";
+                }
+                lines.push(arrow + "<color=" + colorTag + ">[ " + entry.label + " ]</color>" + suffix);
             }
             lines.push("");
             lines.push("<color=#88ccff>" + orbit.photonStatus + "</color>");
@@ -313,10 +372,21 @@
 
             if (!orbit.visible) {
                 orbit.lastSelectDown = false;
+                orbit.lastControlHeld = false;
                 return;
             }
 
-            const y = leftStickY();
+            const controlHeld = leftStickPressed();
+            if (controlHeld !== orbit.lastControlHeld) {
+                orbit.lastText = "";
+                orbit.lastControlHeld = controlHeld;
+            }
+            if (!controlHeld) {
+                orbit.lastSelectDown = false;
+                return;
+            }
+
+            const y = rightStickY();
             if (Math.abs(y) > 0.55 && orbit.tickCount - orbit.lastMoveTick >= INPUT_REPEAT_TICKS) {
                 orbit.cursor += y > 0 ? -1 : 1;
                 clampCursor();
@@ -340,7 +410,7 @@
 
             tmp.method("set_text").invoke(Il2Cpp.string(renderText()));
             tmp.method("set_color").invoke(color(1, 1, 1, 1));
-            tmp.method("set_fontSize").invoke(2.55);
+            tmp.method("set_fontSize").invoke(2.85);
             try { tmp.method("set_alignment").invoke(514); } catch (_) {}
 
             const cam = U.Camera.method("get_main").invoke();
@@ -348,9 +418,9 @@
             const camTransform = cam.method("get_transform").invoke();
             const t = go.method("get_transform").invoke();
             t.method("SetParent", 2).invoke(camTransform, false);
-            t.method("set_localPosition").invoke(vec3(-0.23, 0.05, 0.72));
+            t.method("set_localPosition").invoke(vec3(-0.24, 0.05, 0.72));
             t.method("set_localRotation").invoke(identity());
-            t.method("set_localScale").invoke(vec3(0.04, 0.04, 0.04));
+            t.method("set_localScale").invoke(vec3(0.045, 0.045, 0.045));
 
             U.Object.method("DontDestroyOnLoad").invoke(go);
             orbit.rootHandle = go.handle.toString();
@@ -379,7 +449,7 @@
             }
             if (orbit.tickCount - orbit.lastLog >= LOG_TICKS) {
                 orbit.lastLog = orbit.tickCount;
-                log("tick " + orbit.tickCount + " camera=true visible=" + orbit.visible + " page=" + orbit.page + " cursor=" + orbit.cursor);
+                log("tick " + orbit.tickCount + " camera=true visible=" + orbit.visible + " page=" + orbit.page + " cursor=" + orbit.cursor + " controlHeld=" + orbit.lastControlHeld);
             }
         }
 
@@ -405,3 +475,4 @@
         log("===== Orbit Menu V" + VERSION + " READY =====");
     });
 })();
+
