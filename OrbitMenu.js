@@ -204,7 +204,7 @@ Il2Cpp.perform(() => {
     });
 
     function log(m) { console.log("[Orbit] " + m); }
-    function flash(msg) { O.actionMsg=msg; O.actionTick=O.tick; log(msg); }
+    function flash(msg) { O.actionMsg=msg; O.actionTick=O.tick; _cacheDirty=true; log(msg); }
 
     // ================================================================
     //  HELPERS
@@ -1364,10 +1364,23 @@ Il2Cpp.perform(() => {
     }
 
     // ================================================================
-    //  VR TEXT MENU (head-tracked)
+    //  MENU ITEM CACHE — only rebuild when something changes
+    // ================================================================
+    let _cachedItems = null;
+    let _cacheTab = "", _cachePage = -1, _cacheDirty = true;
+    function invalidateMenu() { _cacheDirty = true; }
+    function getCachedItems() {
+        if (!_cacheDirty && _cachedItems && _cacheTab === O.tab && _cachePage === O.page) return _cachedItems;
+        _cachedItems = menuItems();
+        _cacheTab = O.tab; _cachePage = O.page; _cacheDirty = false;
+        return _cachedItems;
+    }
+
+    // ================================================================
+    //  VR TEXT MENU (head-tracked) — throttled rendering
     // ================================================================
     function renderVRText() {
-        const its=menuItems();
+        const its=getCachedItems();
         const L=["<b><color=#bb88ff>Orbit Menu V7.1"+tabTitle()+"</color></b>",""];
         for(let i=0;i<its.length;i++){const it=its[i];const c=(i===O.cursor)?"<color=#ffcc00>▶</color> ":"   ";let t=it.l;
             if(it.t==="tog") t+=O[it.k]?" <color=#00ff00>[ON]</color>":" <color=#ff4444>[OFF]</color>";
@@ -1390,17 +1403,17 @@ Il2Cpp.perform(() => {
     //  VR INPUT
     // ================================================================
     function processVRInput() {
-        const y=joyY(1),its=menuItems();
+        const y=joyY(1),its=getCachedItems();
         if(O.joyCd>0)O.joyCd--;
         else{if(y<-0.55&&O.cursor<its.length-1){O.cursor++;O.joyCd=18;}else if(y>0.55&&O.cursor>0){O.cursor--;O.joyCd=18;}}
         const selNow=bBtn(1)||trigger(1),press=selNow&&!O.selWas;O.selWas=selNow;
         if(press&&O.cursor<its.length) activateItem(its[O.cursor]);
     }
     function activateItem(it) {
-        if(it.t==="tab"){O.tab=it.to;O.cursor=0;O.page=0;}
-        else if(it.t==="back"){O.tab="main";O.cursor=0;O.page=0;}
-        else if(it.t==="tog"){O[it.k]=!O[it.k];onToggle(it.k,O[it.k]);}
-        else if(it.t==="act"){try{it.fn();}catch(e){flash("err: "+e.message);}}
+        if(it.t==="tab"){O.tab=it.to;O.cursor=0;O.page=0;invalidateMenu();}
+        else if(it.t==="back"){O.tab="main";O.cursor=0;O.page=0;invalidateMenu();}
+        else if(it.t==="tog"){O[it.k]=!O[it.k];onToggle(it.k,O[it.k]);invalidateMenu();}
+        else if(it.t==="act"){try{it.fn();}catch(e){flash("err: "+e.message);}invalidateMenu();}
     }
     function onToggle(k,on) {
         if(k==="flyOn")toggleFly(on);
@@ -1471,20 +1484,43 @@ Il2Cpp.perform(() => {
     // ================================================================
     function onTick() {
         O.tick++;
-        try{const t=TimeClass.method("get_time").invoke();O.deltaTime=t-O.lastTime;O.lastTime=t;if(O.deltaTime>0.1)O.deltaTime=0.016;}catch(_){O.deltaTime=0.016;}
-        if(!O.menuInited&&!O.buildFailed)initMenu();
-        if(O.menuInited){
-            processVRInput(); tickFly(); tickPlatforms(); tickOrbitAll(); tickItemOrbit();
-            tickPrefabOrbit(); tickMobSpawn(); tickSoundboard(); tickAntiModder();
-            // Guns (only one active at a time)
+        // Only read time every 5 ticks
+        if(O.tick%5===0){try{const t=TimeClass.method("get_time").invoke();O.deltaTime=(t-O.lastTime)/5;O.lastTime=t;if(O.deltaTime>0.1)O.deltaTime=0.016;}catch(_){O.deltaTime=0.016;}}
+        if(!O.menuInited&&!O.buildFailed){if(O.tick%30===0)initMenu();return;}
+        if(!O.menuInited) return;
+
+        // ---- EVERY TICK: only critical input + active features ----
+        processVRInput();
+        if(O.flyOn) tickFly();
+        if(O.platformsOn) tickPlatforms();
+
+        // ---- EVERY 2 TICKS: guns ----
+        if(O.tick%2===0){
             if(O.itemGunOn) tickItemGun();
             else if(O.tpGunOn) tickTPGun();
             else if(O.kickGunOn) tickKickGun();
             else if(O.snowballOn) tickSnowball();
             else hideGun();
-            if(O.noRedWatchOn&&O.tick%60===0)toggleNoRedWatch(true);
+        }
+
+        // ---- EVERY 3 TICKS: orbit, menu text ----
+        if(O.tick%3===0){
+            if(O.orbitAllOn) tickOrbitAll();
+            if(O.itemOrbitOn) tickItemOrbit();
+            if(O.prefabOrbitOn) tickPrefabOrbit();
             setText(renderVRText());
         }
+
+        // ---- EVERY 10 TICKS: slow stuff ----
+        if(O.tick%10===0){
+            tickMobSpawn();
+            tickSoundboard();
+            if(O.noRedWatchOn) toggleNoRedWatch(true);
+        }
+
+        // ---- EVERY 90 TICKS: anti-modder (already rate-limited inside but gate it here too) ----
+        if(O.tick%90===0) tickAntiModder();
+
         if(O.tick-O.lastLog>=300){O.lastLog=O.tick;log("t="+O.tick+" fly="+O.flyOn+" guns="+O.itemGunOn+"/"+O.tpGunOn+"/"+O.kickGunOn+"/"+O.snowballOn+" shield="+O.shieldOn+" antimod="+O.antiModderOn);}
     }
 
